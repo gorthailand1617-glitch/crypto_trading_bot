@@ -10,6 +10,13 @@ import pandas as pd
 
 # Load environment
 dotenv.load_dotenv()
+try:
+    if hasattr(st, "secrets"):
+        for sec_key, sec_val in st.secrets.items():
+            if isinstance(sec_val, (str, int, float, bool)):
+                os.environ.setdefault(sec_key, str(sec_val))
+except Exception:
+    pass
 from config import BOT_VERSION
 
 # Process-Global Connection Cache Layer
@@ -274,8 +281,11 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode('utf-8'))
 
 def run_api_server():
-    server = HTTPServer(('127.0.0.1', 8550), DashboardAPIHandler)
-    server.serve_forever()
+    try:
+        server = HTTPServer(('127.0.0.1', 8550), DashboardAPIHandler)
+        server.serve_forever()
+    except Exception as e:
+        print(f"[API SERVER WARNING] Could not start local API server: {e}")
 
 # Spawn background updater and API once (safely scoped)
 if not hasattr(st, "_global_bg_running"):
