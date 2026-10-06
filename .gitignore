@@ -1,0 +1,31 @@
+# Environment variables & secrets (CRITICAL: DO NOT COMMIT)
+.env
+*.env
+.env.*
+
+# Python Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Databases & Logs
+*.db
+*.sqlite3
+*.log
+app.log
+
+# Dynamic State Files
+state.json
+
+# IDE & OS Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  # Trading Engine Service (Runs 24/7 in background)
+  alpha-bot:
+    build: .
+    container_name: alphascalp_bot
+    restart: unless-stopped
+    command: python bot.py
+    env_file:
+      - .env
+    volumes:
+      - ./trades.db:/app/trades.db
+      - ./state.json:/app/state.json
+      - ./app.log:/app/app.log
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Streamlit Real-Time Dashboard Service
+  alpha-dashboard:
+    build: .
+    container_name: alphascalp_dashboard
+    restart: unless-stopped
+    command: python -m streamlit run dashboard.py --server.port=8501 --server.address=0.0.0.0
+    ports:
+      - "8501:8501"
+      - "8550:8550"
+    env_file:
+      - .env
+    volumes:
+      - ./trades.db:/app/trades.db
+      - ./state.json:/app/state.json
+      - ./app.log:/app/app.log
+    depends_on:
+      - alpha-bot
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

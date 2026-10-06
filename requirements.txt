@@ -1,0 +1,8 @@
+aiohttp
+ccxt
+pandas
+numpy
+python-dotenv
+streamlit
+plotly
+python-telegram-bot
