@@ -41,13 +41,13 @@ class StateManager:
     def _default_state(self) -> Dict[str, Any]:
         """Provides default initial parameters for the bot."""
         return {
-            "balance": 10000.0,
+            "balance": 1.4252,
             "positions": {},       # e.g., {"BTC/USDT": {"size": 0.0, "entry_price": 0.0, "margin_mode": "isolated", "leverage": 5}}
             "orders": {},          # e.g., {"BTC/USDT": []}
             "bot_status": "running", # "running" or "paused"
             "dry_run": True,
             "last_update": time.time(),
-            "equity": 10000.0,
+            "equity": 1.4252,
             "pnl": 0.0,
             "trades_count": 0,
             "win_rate": 0.0,

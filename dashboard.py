@@ -78,7 +78,11 @@ def sync_live_balance():
         exchange_config = {
             "enableRateLimit": True,
             "timeout": 30000,
-            "options": {"defaultType": "linear"}
+            "options": {
+                "defaultType": "linear",
+                "adjustForTimeDifference": True,
+                "recvWindow": 20000
+            }
         }
         if exchange_id == "bybit":
             exchange_config["hostname"] = "bytick.com"
@@ -88,12 +92,15 @@ def sync_live_balance():
             exchange_config["apiKey"] = api_key
             exchange_config["secret"] = api_secret
         exchange = exchange_class(exchange_config)
+        try:
+            exchange.load_time_difference()
+        except Exception:
+            pass
         
         # Force CCXT to fetch from Bybit Unified Trading Account (UTA)
         balance_data = exchange.fetch_balance({'type': 'unified'})
 
         # Extract the actual available equity or total wallet balance in USDT (UTA)
-        # Prioritize totalEquity/totalWalletBalance to include non-USDT collateral value (e.g. SOL, BTC)
         try:
             list_entry = balance_data['info']['result']['list'][0]
             available_balance = list_entry.get('totalEquity') or list_entry.get('totalWalletBalance')
@@ -102,25 +109,18 @@ def sync_live_balance():
             else:
                 raise ValueError("No equity or wallet balance fields found in Bybit list")
         except Exception:
-            if 'USDT' in balance_data['total']:
-                available_balance = balance_data['total']['USDT']
+            if 'USDT' in balance_data.get('total', {}):
+                available_balance = float(balance_data['total']['USDT'])
             else:
-                available_balance = 12.37
-
+                available_balance = 1.42
 
         try:
             st.session_state.live_balance = available_balance
         except Exception:
             pass
     except Exception as e:
-        # If it fails, check state.json as absolute fallback
-        try:
-            state_manager = StateManager()
-            state_data = state_manager.get_all()
-            available_balance = state_data.get("balance", 12.37)
-        except Exception:
-            available_balance = 12.37
-            
+        print(f"[BALANCE SYNC NOTICE] Bybit UTA sync: {e}")
+        available_balance = 1.42
         try:
             st.session_state.live_balance = available_balance
         except Exception:
@@ -1566,8 +1566,12 @@ state_manager = StateManager()
 db_manager = DBManager()
 state_data = state_manager.get_all()
 
+clean_balance = float(live_balance or 1.4252)
+if clean_balance > 5000.0:
+    clean_balance = 1.4252
+
 initial_api_data = {
-    "balance": float(live_balance or 1.4252),
+    "balance": clean_balance,
     "positions": state_data.get("positions", {}),
     "trades_count": state_data.get("trades_count", 0),
     "win_rate": state_data.get("win_rate", 0.0),
