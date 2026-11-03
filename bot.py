@@ -198,7 +198,7 @@ class ScalpingBot:
 
         # Multi-Asset Market Scanner & Auto-Hunt Configuration
         self.auto_hunt = os.getenv("AUTO_HUNT", "false").strip().lower() in ["true", "1", "yes"]
-        raw_candidates = os.getenv("CANDIDATE_PAIRS", "XRP/USDT,SOL/USDT,DOGE/USDT,SUI/USDT,BTC/USDT,ETH/USDT,PEPE/USDT,ADA/USDT")
+        raw_candidates = os.getenv("CANDIDATE_PAIRS", "XRP/USDT,SOL/USDT,DOGE/USDT,SUI/USDT,BTC/USDT,ETH/USDT,ADA/USDT,AVAX/USDT")
         self.candidate_symbols = [s.strip() for s in raw_candidates.split(",") if s.strip()]
         
         # Set default CMO thresholds in state if they do not exist (stricter -65.0 for XRP Long)
@@ -288,62 +288,30 @@ class ScalpingBot:
             print("[TELEGRAM] Telegram token not configured. Polling disabled.")
             return
 
-        # Ensure drop_pending_updates=True remains locked on application initialization to prevent request amplification
-        print("[TELEGRAM] Deleting webhook and dropping pending updates...")
+        # Delete any active webhook so getUpdates polling works reliably without dropping messages
         try:
             delete_webhook_url = f"https://api.telegram.org/bot{self.telegram_token}/deleteWebhook"
             async with aiohttp.ClientSession() as session:
-                async with session.post(delete_webhook_url, json={"drop_pending_updates": True}, timeout=5) as response:
+                async with session.post(delete_webhook_url, timeout=5) as response:
                     await response.read()
         except Exception as e:
-            print(f"[TELEGRAM] Webhook delete/drop updates bypass: {e}")
+            logger.debug(f"[TELEGRAM] Webhook delete: {e}")
 
         url = f"https://api.telegram.org/bot{self.telegram_token}/getUpdates"
-
-        print("[TELEGRAM] Executing Backlog Purging with offset=-1...")
         offset = 0
-        try:
-            async with aiohttp.ClientSession() as session:
-                params = {"offset": -1, "timeout": 1, "allowed_updates": '["message"]'}
-                async with session.get(url, params=params, timeout=5) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if data.get("ok"):
-                            results = data.get("result", [])
-                            if results:
-                                offset = results[-1]["update_id"] + 1
-        except Exception as e:
-            print(f"[TELEGRAM] Purge bypass: {e}")
 
-        print("[TELEGRAM] Starting interactive status bot polling loop with error resilience...")
+        logger.info("📡 [TELEGRAM] Starting resilient polling loop for Telegram commands...")
 
-        need_purge_offset = False
         while True:
             try:
-                if need_purge_offset:
-                    # Execute Backlog Purging with offset=-1 upon re-establishing connection
-                    try:
-                        async with aiohttp.ClientSession() as session:
-                            purge_params = {"offset": -1, "timeout": 5, "allowed_updates": '["message"]'}
-                            async with session.get(url, params=purge_params, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                                if response.status == 200:
-                                    data = await response.json()
-                                    if data.get("ok") and data.get("result"):
-                                        offset = data.get("result")[-1]["update_id"] + 1
-                                        logger.info(f"🔄 [TELEGRAM RECONNECT] Purged pending backlog. New offset: {offset}")
-                                        need_purge_offset = False
-                    except Exception as purge_err:
-                        logger.debug(f"Purge bypass on reconnect: {purge_err}")
-
                 async with aiohttp.ClientSession() as session:
-                    # Strict Telemetry v2.0 Resilience Configuration (60s total, 30s socket limits)
                     timeout_settings = aiohttp.ClientTimeout(
-                        total=60.0,
-                        connect=30.0,
-                        sock_read=30.0,
-                        sock_connect=30.0
+                        total=35.0,
+                        connect=10.0,
+                        sock_read=25.0,
+                        sock_connect=10.0
                     )
-                    params = {"offset": offset, "timeout": 30}
+                    params = {"offset": offset, "timeout": 20, "allowed_updates": '["message"]'}
                     async with session.get(url, params=params, timeout=timeout_settings) as response:
                         if response.status == 200:
                             data = await response.json()
@@ -351,23 +319,24 @@ class ScalpingBot:
                                 updates = data.get("result", [])
                                 for update in updates:
                                     offset = update["update_id"] + 1
-                                    # Handle update concurrently
                                     asyncio.create_task(self.handle_telegram_update(update))
+                        elif response.status == 409:
+                            logger.warning("⚠️ [TELEGRAM 409 CONFLICT] Another instance is polling. Waiting 5s...")
+                            await asyncio.sleep(5.0)
                         else:
                             resp_text = await response.text()
-                            raise Exception(f"HTTP {response.status}: {resp_text}")
+                            logger.warning(f"[TELEGRAM POLLING NON-200] {response.status}: {resp_text}")
+                            await asyncio.sleep(3.0)
                 await asyncio.sleep(0.5)
             except asyncio.CancelledError:
                 break
             except Exception as telegram_drop_err:
                 err_str = str(telegram_drop_err)
-                need_purge_offset = True  # Flag to trigger offset=-1 purge on reconnect
-                if "timeout" in err_str.lower() or "socket" in err_str.lower() or "getaddrinfo" in err_str.lower() or "connection" in err_str.lower():
-                    logger.debug(f"🔇 [TELEGRAM SILENT RETRY] Network pause: {err_str}")
-                    await asyncio.sleep(5.0)  # Explicit 5s backoff to prevent tight-loop CPU spiking
+                if "timeout" in err_str.lower() or "socket" in err_str.lower() or "connection" in err_str.lower():
+                    await asyncio.sleep(2.0)
                 else:
-                    logger.error(f"[TELEGRAM CRITICAL ERROR]: {err_str}")
-                    await asyncio.sleep(5.0)  # Explicit 5s backoff to prevent tight-loop CPU spiking
+                    logger.error(f"[TELEGRAM ERROR]: {err_str}")
+                    await asyncio.sleep(3.0)
 
     # Harden the Telegram ApplicationBuilder and HTTPX Request setup sequence
     def configure_telegram_builder_setup(self):
@@ -396,7 +365,7 @@ class ScalpingBot:
             return None
 
     async def handle_telegram_update(self, update: dict) -> None:
-        """Parses and routes commands from updates."""
+        """Parses and routes commands from updates with flexible tokenization and logging."""
         message = update.get("message") or update.get("edited_message")
         if not message:
             return
@@ -411,13 +380,22 @@ class ScalpingBot:
         if not text.startswith("/"):
             return
 
+        logger.info(f"📩 [TELEGRAM INCOMING] Received text: '{text}' from Chat ID: {chat_id}")
+
         # Security check
         if not await self.security_check(chat_id):
             return
 
-        parts = text.split()
-        command = parts[0].lower()
-        sub_arg = parts[1].lower() if len(parts) > 1 else ""
+        # Flexible tokenization (e.g. handles '/autohunt on , /scan' or '/scan@AlphaBot')
+        clean_tokens = [t.strip().rstrip(",;.") for t in text.replace(",", " ").split() if t.strip()]
+        if not clean_tokens:
+            return
+
+        command = clean_tokens[0].split("@")[0].lower()
+        sub_arg = clean_tokens[1].lower() if len(clean_tokens) > 1 else ""
+
+        # Check if user sent multiple commands in one line like '/autohunt on , /scan'
+        has_scan_in_tokens = any(t.lower().split("@")[0] in ["/scan", "/hunt", "/best_pair"] for t in clean_tokens[1:])
 
         if command in ["/help", "/?"]:
             help_message = (
@@ -426,7 +404,7 @@ class ScalpingBot:
                 "• **/status** : ตรวจเช็คสถานะระบบปฏิบัติการและสัญญาณ Heartbeat\n"
                 "• **/balance** : ดึงยอดเงินสดจริงบน Bybit UTA แบบ Real-time\n"
                 "• **/position** : ตรวจสอบตำแหน่งสัญญาที่เปิดค้างอยู่\n"
-                "• **/hunt** : 🎯 ให้สภา AI สแกนทุกเหรียญเพื่อเฟ้นหาคู่ที่กำไรเร็วและสูงที่สุด\n"
+                "• **/hunt** (หรือ **/scan**) : 🎯 ให้สภา AI สแกนทุกเหรียญเพื่อเฟ้นหาคู่ที่กำไรเร็วและสูงที่สุด\n"
                 "• **/hunt trade** : ⚡ สั่งให้สภา AI สแกนเลือกเหรียญที่ดีที่สุดแล้วยิงออเดอร์ทันที\n"
                 "• **/autohunt on/off** : 🔄 เปิด/ปิดโหมดสแกนและสลับเทรดเหรียญเร็วอัตโนมัติ\n"
                 "• **/vault** : 🏦 ตรวจสอบยอดเงินกองทุนสะสมรักษาทุน (1/3 Vault Rule)\n"
@@ -459,6 +437,11 @@ class ScalpingBot:
             await self.cmd_hunt(chat_id, sub_arg)
         elif command in ["/autohunt", "/auto_hunt"]:
             await self.cmd_autohunt(chat_id, sub_arg)
+            if has_scan_in_tokens:
+                await asyncio.sleep(0.5)
+                await self.cmd_hunt(chat_id, "")
+        else:
+            await self.reply_to_telegram(chat_id, f"❓ ไม่รู้จักคำสั่ง `{command}` ครับ พิมพ์ **/help** เพื่อดูรายการคำสั่งทั้งหมด")
 
     async def cmd_ai_analyze(self, chat_id: int) -> None:
         await self.reply_to_telegram(chat_id, "⏳ *[สภา AI กำลังประชุม]* กำลังเรียกทีมวิเคราะห์ 4 สาย และจัดโต้วาทีสด Bull vs Bear กรุณารอสักครู่ครับ...")
@@ -564,24 +547,40 @@ class ScalpingBot:
 
     async def scan_market_candidates(self, symbols: List[str] = None) -> List[Dict[str, Any]]:
         """
-        Scans candidate crypto futures pairs on Bybit,
+        Scans candidate crypto futures pairs on Bybit with fast non-blocking calls,
         calculates CMO, ATR %, 24h change %, and Volume Spikes for each.
         """
         sym_list = symbols if symbols else getattr(self, "candidate_symbols", [
-            "XRP/USDT", "SOL/USDT", "DOGE/USDT", "SUI/USDT", "BTC/USDT", "ETH/USDT", "PEPE/USDT", "ADA/USDT"
+            "XRP/USDT", "SOL/USDT", "DOGE/USDT", "SUI/USDT", "BTC/USDT", "ETH/USDT", "ADA/USDT", "AVAX/USDT"
         ])
         results = []
 
         async def fetch_one(sym: str):
             try:
-                ticker = await self.fetch_ticker_safe(symbol=sym)
+                # Fast direct ticker fetch with 3.5s timeout
+                ticker = await asyncio.wait_for(
+                    self.exchange.fetch_ticker(sym, params={'category': 'linear'}),
+                    timeout=3.5
+                )
                 last_price = safe_float(ticker.get("last", 0.0))
                 change_24h = safe_float(ticker.get("percentage", 0.0))
                 quote_vol = safe_float(ticker.get("quoteVolume", 0.0))
 
-                df = await self.fetch_ohlcv_safe(limit=40, symbol=sym)
-                if df.empty or len(df) < 20:
+                formatted_symbol = sym.replace('/', '').split(':')[0]
+                candles = await asyncio.wait_for(
+                    self.exchange.fetch_ohlcv(
+                        symbol=formatted_symbol,
+                        timeframe=self.timeframe,
+                        limit=30,
+                        params={'category': 'linear'}
+                    ),
+                    timeout=3.5
+                )
+                if not candles or len(candles) < 15:
                     return None
+
+                df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
 
                 cmo_series = calculate_cmo(df)
                 latest_cmo = float(cmo_series.iloc[-1]) if not cmo_series.empty else 0.0
@@ -610,7 +609,7 @@ class ScalpingBot:
                     "regime": str(latest_regime)
                 }
             except Exception as e:
-                logger.warning(f"Failed scanning candidate {sym}: {e}")
+                logger.debug(f"Candidate scan bypass {sym}: {e}")
                 return None
 
         tasks = [fetch_one(s) for s in sym_list]
