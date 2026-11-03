@@ -159,6 +159,20 @@ class DBManager:
         conn.close()
         return allocations
 
+    def get_recent_logs(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Synchronous query helper for reading recent database logs."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT ?", (limit,))
+            rows = cursor.fetchall()
+            logs = [dict(row) for row in rows]
+            conn.close()
+            return logs
+        except Exception:
+            return []
+
     def get_recent_decisions(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Synchronous query helper for decisions (read operations)."""
         conn = sqlite3.connect(self.db_path)

@@ -376,8 +376,7 @@ class ScalpingBot:
 
         chat_id = chat.get("id")
         text = message.get("text", "").strip()
-
-        if not text.startswith("/"):
+        if not text:
             return
 
         logger.info(f"📩 [TELEGRAM INCOMING] Received text: '{text}' from Chat ID: {chat_id}")
@@ -386,13 +385,40 @@ class ScalpingBot:
         if not await self.security_check(chat_id):
             return
 
-        # Flexible tokenization (e.g. handles '/autohunt on , /scan' or '/scan@AlphaBot')
-        clean_tokens = [t.strip().rstrip(",;.") for t in text.replace(",", " ").split() if t.strip()]
+        # If text does not contain any slash command, send a friendly greeting & shortcuts
+        if "/" not in text:
+            guide_msg = (
+                "🤖 *AlphaScalp Control Center (V6.0)*\n"
+                "สวัสดีครับครูกอร์! ระบบพร้อมทำงาน 100% ครับ\n\n"
+                "💡 *คำสั่งหลักที่ใช้งานได้ทันที:*\n"
+                "• **/scan** (หรือ **/hunt**) : 🎯 สั่งสภา AI สแกนทุกเหรียญเพื่อเฟ้นหาคู่ที่กำไรเร็วที่สุด\n"
+                "• **/autohunt on** : 🔄 เปิดโหมดสแกนและสลับเทรดเหรียญเร็วอัตโนมัติ\n"
+                "• **/status** : ตรวจเช็คสถานะระบบและสัญญาณ Heartbeat\n"
+                "• **/balance** : ดึงยอดเงินสดบน Bybit\n"
+                "• **/help** : ดูรายการคำสั่งทั้งหมด"
+            )
+            await self.reply_to_telegram(chat_id, guide_msg)
+            return
+
+        # Extract command starting from the first slash (supports copy-pasting like "พิมพ์ /scan")
+        slash_idx = text.find("/")
+        cmd_text = text[slash_idx:].strip()
+
+        clean_tokens = [t.strip().rstrip(",;.") for t in cmd_text.replace(",", " ").split() if t.strip()]
         if not clean_tokens:
             return
 
         command = clean_tokens[0].split("@")[0].lower()
         sub_arg = clean_tokens[1].lower() if len(clean_tokens) > 1 else ""
+
+        # Clean sub_arg of extraneous copy-pasted text like (เพื่อเปิดระบบ...)
+        sub_arg = sub_arg.strip("()[]{}")
+        if "on" in sub_arg:
+            sub_arg = "on"
+        elif "off" in sub_arg:
+            sub_arg = "off"
+        elif "trade" in sub_arg:
+            sub_arg = "trade"
 
         # Check if user sent multiple commands in one line like '/autohunt on , /scan'
         has_scan_in_tokens = any(t.lower().split("@")[0] in ["/scan", "/hunt", "/best_pair"] for t in clean_tokens[1:])
@@ -2217,18 +2243,34 @@ class ScalpingBot:
                 async def handle_health(request):
                     status = self.state_manager.get("bot_status", "running")
                     price = self.state_manager.get("last_price", "N/A")
+                    auto_hunt_on = getattr(self, "auto_hunt", False)
                     body = (
-                        f"AlphaScalp Bot V{BOT_VERSION} is ONLINE\n"
+                        f"AlphaScalp Bot {BOT_VERSION} [v6.2-autohunt-online]\n"
                         f"Status: {status}\n"
                         f"Symbol: {self.symbol}\n"
+                        f"AutoHunt Active: {auto_hunt_on}\n"
                         f"Dry Run: {self.dry_run}\n"
                         f"Last Price: {price}\n"
                     )
                     return web.Response(text=body, content_type="text/plain")
 
+                async def handle_logs(request):
+                    logs = self.db_manager.get_recent_logs(limit=40)
+                    lines = [f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(l['timestamp']))}] [{l['module']}] {l['level']}: {l['message']}" for l in logs]
+                    return web.Response(text="\n".join(lines) or "No logs in DB yet", content_type="text/plain")
+
+                async def handle_test_tg(request):
+                    chat_id = getattr(self, 'telegram_chat_id', '')
+                    if chat_id:
+                        await self.reply_to_telegram(int(chat_id), "🔔 *[Render Cloud System Active]* ระบบเชื่อมต่อกับ Telegram เรียบร้อย พร้อมรับคำสั่ง /scan และ /autohunt ครับ!")
+                        return web.Response(text=f"Test message dispatched to {chat_id}", content_type="text/plain")
+                    return web.Response(text="TELEGRAM_CHAT_ID not configured", content_type="text/plain")
+
                 app = web.Application()
                 app.router.add_get("/", handle_health)
                 app.router.add_get("/health", handle_health)
+                app.router.add_get("/logs", handle_logs)
+                app.router.add_get("/test_tg", handle_test_tg)
                 http_runner = web.AppRunner(app)
                 await http_runner.setup()
                 site = web.TCPSite(http_runner, "0.0.0.0", int(port_env))
