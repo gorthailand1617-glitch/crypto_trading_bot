@@ -374,13 +374,14 @@ class RiskManager:
 
         # 4. Telegram Emergency Broadcast
         alert_msg = (
-            f"🚨 *[EMERGENCY CIRCUIT BREAKER ACTIVATED]*\n"
-            f"• *Symbol:* `{target_symbol}`\n"
-            f"• *Action:* Immediate Market Close (`close_all_positions`)\n"
-            f"• *Reason:* `{reason}`\n"
-            f"• *Exit Price:* `{exit_price:.4f}`\n"
-            f"• *Realized Loss:* `${pnl:.2f}`\n"
-            f"• *Protection:* Margin Shield prevented full exchange liquidation."
+            f"🚨 *[เปิดใช้งานระบบตัดขาดทุนฉุกเฉิน (Circuit Breaker)]*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• *คู่เหรียญ:* `{target_symbol}`\n"
+            f"• *การดำเนินการ:* สั่งปิดทุกไม้ทันทีด้วยราคาตลาด (`close_all_positions`)\n"
+            f"• *สาเหตุ:* `{reason}`\n"
+            f"• *ราคาที่ปิดสถานะ:* `${exit_price:.4f}`\n"
+            f"• *ขาดทุนจริงรอบนี้:* `${pnl:.2f} USDT`\n"
+            f"• *ระบบป้องกัน:* Margin Shield ตัดขาดทุนทันทีเพื่อป้องกันพอร์ตจากการถูก Liquidate บนกระดานเทรด"
         )
         if hasattr(bot_instance, 'send_telegram'):
             await bot_instance.send_telegram(alert_msg)

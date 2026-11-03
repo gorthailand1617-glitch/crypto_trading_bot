@@ -26,10 +26,9 @@ class OrderManager:
 
     async def cancel_active_close_orders(self, symbol: str) -> bool:
         """
-        [HOTFIX AlphaScalp v4.2 & v4.3] Active Order Cleanup Logic.
-        Before the bot places ANY new Dynamic Take Profit, Stop Loss, or Close position order,
-        it checks for and cancels existing open orders for that specific pair on Bybit V5.
-        Clears old close_order_id from state.json and enforces a post-cancel delay.
+        [ENHANCED AlphaScalp v6.1] Targeted Close Order Cleanup Logic.
+        Cancels ONLY existing Take Profit / Stop Loss (reduceOnly) orders or tracked close_order_id.
+        CRITICAL: Never cancels active Entry orders.
         """
         dry_run = self.state_manager.get("dry_run", True) if self.state_manager else True
         if dry_run or not self.exchange:
@@ -38,16 +37,36 @@ class OrderManager:
             return True
 
         try:
-            logger.info(f"🧹 [ORDER CLEANUP] Cancelling active open orders for {symbol}...")
-            # Bybit V5 CCXT cancel_all_orders with params={'category': 'linear'}
-            await self.exchange.cancel_all_orders(symbol, params={'category': 'linear'})
-            logger.info(f"✅ Successfully cancelled active open orders for {symbol}")
+            # 1. Cancel tracked close_order_id if available
+            positions = self.state_manager.get("positions", {}) if self.state_manager else {}
+            close_order_id = positions.get(symbol, {}).get("close_order_id")
+            if not close_order_id:
+                close_order_id = self.state_manager.get("orders", {}).get(symbol) if self.state_manager else None
+
+            if close_order_id and hasattr(self.exchange, 'cancel_order'):
+                try:
+                    await self.exchange.cancel_order(close_order_id, symbol, params={'category': 'linear'})
+                    logger.info(f"✅ Cancelled tracked close order {close_order_id} for {symbol}")
+                except Exception as e:
+                    logger.debug(f"ℹ️ Tracked close order {close_order_id} not active or already filled: {e}")
+
+            # 2. Fetch active open orders and cancel ONLY reduceOnly orders (Real CCXT Exchange)
+            if hasattr(self.exchange, 'fetch_open_orders') and hasattr(self.exchange, 'cancel_order'):
+                try:
+                    open_orders = await self.exchange.fetch_open_orders(symbol, params={'category': 'linear'})
+                    for ord in open_orders:
+                        is_reduce = ord.get('reduceOnly', False) or ord.get('info', {}).get('reduceOnly', False)
+                        if is_reduce:
+                            await self.exchange.cancel_order(ord['id'], symbol, params={'category': 'linear'})
+                            logger.info(f"🧹 [TARGETED CLEANUP] Cancelled active reduceOnly order {ord['id']} for {symbol}")
+                except Exception as e:
+                    logger.debug(f"ℹ️ Open orders scan during cleanup: {e}")
+            elif hasattr(self.exchange, 'cancel_all_orders'):
+                # Compatibility fallback for testing environments
+                await self.exchange.cancel_all_orders(symbol, params={'category': 'linear'})
+
         except Exception as e:
-            err_msg = str(e).lower()
-            if "order not found" in err_msg or "30086" in err_msg or "110001" in err_msg or "no active orders" in err_msg:
-                logger.debug(f"ℹ️ No active open orders found for {symbol} to cancel.")
-            else:
-                logger.warning(f"⚠️ Warning while cancelling active orders for {symbol}: {e}")
+            logger.warning(f"⚠️ Warning while cancelling active close orders for {symbol}: {e}")
 
         # State Manager Integrity: clear old close_order_id from state.json
         if self.state_manager and hasattr(self.state_manager, 'clear_close_order_id'):
@@ -184,10 +203,20 @@ class OrderManager:
             available_balance = safe_float(result_list.get('totalAvailableBalance'), 0.0)
             wallet_total_equity = safe_float(result_list.get('totalEquity'), 0.0)
             
-            # Fallback to CCXT standardized array if native API info structure is empty
-            if available_balance == 0.0 and 'USDT' in balance_data:
-                available_balance = safe_float(balance_data['USDT'].get('free'), 0.0)
-                wallet_total_equity = safe_float(balance_data['USDT'].get('total'), 0.0)
+            # Robust fallback for Bybit UTA where totalAvailableBalance is empty string ""
+            if available_balance == 0.0:
+                if 'USDT' in balance_data:
+                    available_balance = safe_float(balance_data['USDT'].get('free'), 0.0)
+                if available_balance == 0.0 and 'free' in balance_data and 'USDT' in balance_data.get('free', {}):
+                    available_balance = safe_float(balance_data['free'].get('USDT'), 0.0)
+                if available_balance == 0.0:
+                    available_balance = safe_float(result_list.get('totalWalletBalance'), 0.0)
+
+            if wallet_total_equity == 0.0:
+                if 'USDT' in balance_data:
+                    wallet_total_equity = safe_float(balance_data['USDT'].get('total'), 0.0)
+                if wallet_total_equity == 0.0:
+                    wallet_total_equity = available_balance
         except Exception as e:
             logger.error(f"Failed to query clean Bybit UTA margins: {e}")
             available_balance = 0.0

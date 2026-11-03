@@ -20,11 +20,11 @@ RISK_CONTROL_REGIME = {
     'XRP_USDT': {
         'leverage': 5,
         'min_position_size': 3.0,
-        'take_profit_pct': 0.004,
-        'stop_loss_pct': 0.006,
-        'max_hold_kline': 3,
+        'take_profit_pct': 0.012,        # Optimized: 1.2% profit target so profit significantly beats fees
+        'stop_loss_pct': 0.008,          # Optimized: 0.8% stop loss (R:R = 1.5 : 1)
+        'max_hold_kline': 6,             # Allow up to 6 bars for price to reach higher 1.2% target
         'order_params': {'postOnly': True, 'category': 'linear'},
-        'cmo_oversold_long': -65.0,  # Stricter CMO threshold for XRP Long bottom catching (-65.0)
+        'cmo_oversold_long': -65.0,      # Stricter CMO threshold for XRP Long bottom catching (-65.0)
         'cmo_overbought_short': 60.0,
         'max_notional_exposure': 50.0,
         'margin_shield_threshold_pct': 0.70
@@ -32,9 +32,9 @@ RISK_CONTROL_REGIME = {
     'SOL_USDT': {
         'leverage': 5,
         'min_position_size': 0.1,
-        'take_profit_pct': 0.005,
-        'stop_loss_pct': 0.006,
-        'max_hold_kline': 3,
+        'take_profit_pct': 0.015,
+        'stop_loss_pct': 0.010,
+        'max_hold_kline': 6,
         'order_params': {'postOnly': True, 'category': 'linear'},
         'cmo_oversold_long': -60.0,
         'cmo_overbought_short': 60.0,
@@ -62,8 +62,8 @@ PROFIT_ALLOCATION_CONFIG = {
 BREAKEVEN_CONFIG = {
     'enabled': True,
     'trigger_ratio': 0.50,       # Lock to breakeven when 50% distance to target 1 is achieved
-    'min_profit_pct': 0.0025,    # Or when unrealized profit reaches +0.25%
-    'fee_buffer_pct': 0.0006     # +0.06% buffer over entry price to guarantee zero-fee breakeven
+    'min_profit_pct': 0.0050,    # Or when unrealized profit reaches +0.50%
+    'fee_buffer_pct': 0.0012     # +0.12% buffer over entry price to guarantee zero-fee breakeven (covers round-trip taker fees)
 }
 
 # Orderbook Microstructure & Liquidity Imbalance Filter

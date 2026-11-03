@@ -49,12 +49,13 @@ dotenv.load_dotenv()
 
 from utils.state_manager import StateManager
 from utils.db_manager import DBManager
-from utils.indicators import calculate_cmo, calculate_vwap_bands, calculate_tii, classify_market_regime, calculate_ema
+from utils.indicators import calculate_cmo, calculate_vwap_bands, calculate_tii, classify_market_regime, calculate_ema, calculate_net_pnl
 from utils.order_manager import OrderManager
 from utils.profit_allocator import ProfitAllocator
 from risk_manager import RiskManager
 from config import SAFE_TRADING_CORE, RISK_CONTROL_REGIME, BOT_VERSION, PROFIT_ALLOCATION_CONFIG, BREAKEVEN_CONFIG, MICROSTRUCTURE_CONFIG
 from adaptive_brain import AdaptiveBrain
+from multi_agent_brain import MultiAgentBrain
 
 
 # Helper function for resilient numeric parsing
@@ -85,7 +86,7 @@ def ccxt_retry(max_retries: int = 4, base_delay: float = 2.0):
                     if self and hasattr(self, "connection_ok") and not self.connection_ok:
                         self.connection_ok = True
                         self.db_manager.log_message("INFO", "Connection to exchange restored.", "TradingEngine")
-                        msg = "✅ *Connection Restored*\nSuccessfully re-established connection to the exchange."
+                        msg = "✅ *การเชื่อมต่อกลับมาเป็นปกติ (Connection Restored)*\nระบบเชื่อมต่อกับกระดานเทรด Bybit สำเร็จเรียบร้อยแล้วครับ"
                         await self.send_telegram(msg)
                     return res
                 except Exception as e:
@@ -113,7 +114,7 @@ def ccxt_retry(max_retries: int = 4, base_delay: float = 2.0):
                         if self and hasattr(self, "connection_ok") and self.connection_ok:
                             self.connection_ok = False
                             self.db_manager.log_message("WARNING", f"Connection to exchange lost: {e}", "TradingEngine")
-                            msg = f"⚠️ *Connection Lost*\nFailed to connect to exchange: {e}"
+                            msg = f"⚠️ *ขาดการเชื่อมต่อกับกระดานเทรด (Connection Lost)*\nเกิดข้อผิดพลาดในการเชื่อมต่อ: `{e}`\n🔄 ระบบกำลังพยายามเชื่อมต่อใหม่อัตโนมัติ..."
                             await self.send_telegram(msg)
                             
                         if attempt < max_retries:
@@ -192,6 +193,9 @@ class ScalpingBot:
         self.brain.set_state(self.state_manager.get("brain_model_state", {}))
         self.last_confidence = 0.5
         
+        # Initialize Multi-Agent LLM Trading Council (TradingAgents Framework)
+        self.multi_agent_brain = MultiAgentBrain()
+        
         # Set default CMO thresholds in state if they do not exist (stricter -65.0 for XRP Long)
         if self.state_manager.get("cmo_upper") is None:
             self.state_manager.set("cmo_upper", 60.0)
@@ -262,7 +266,7 @@ class ScalpingBot:
         """Strict chat ID security filtering."""
         if str(chat_id) != self.telegram_chat_id:
             print(f"[TELEGRAM SECURITY WARNING] Unauthorized access attempt from Chat ID: {chat_id}")
-            await self.reply_to_telegram(chat_id, "🔒 Unauthorized Access Denied.")
+            await self.reply_to_telegram(chat_id, "🔒 *ปฏิเสธการเข้าถึง (Unauthorized)*\nบัญชี Telegram นี้ไม่ได้รับอนุญาตให้สั่งงานบอทครับ")
             return False
         return True
 
@@ -409,6 +413,7 @@ class ScalpingBot:
                 "• **/position** : ตรวจสอบตำแหน่งสัญญาที่เปิดค้างอยู่\n"
                 "• **/vault** : 🏦 ตรวจสอบยอดเงินกองทุนสะสมรักษาทุน (1/3 Vault Rule)\n"
                 "• **/stats** : สรุปจำนวนรอบและเปอร์เซ็นต์ Win Rate จากฐานข้อมูล\n"
+                "• **/ai** : 🧠 เรียกสภา Multi-Agent AI วิเคราะห์และโต้วาทีสดทันที\n"
                 "• **/pause** : ⏸️ สั่งหยุดพักการเปิดออเดอร์ใหม่ชั่วคราว\n"
                 "• **/resume** : ▶️ สั่งให้บอทกลับมาสแกนและเทรดต่อ\n"
                 "• **/closeall** : 🚨 สั่งปิดทุกไม้ฉุกเฉินทันทีด้วย Market Order"
@@ -430,21 +435,34 @@ class ScalpingBot:
             await self.cmd_resume(chat_id)
         elif command in ["/closeall", "/emergency_close"]:
             await self.cmd_closeall(chat_id)
+        elif command in ["/ai", "/analyze", "/ai_analyze"]:
+            await self.cmd_ai_analyze(chat_id)
+
+    async def cmd_ai_analyze(self, chat_id: int) -> None:
+        await self.reply_to_telegram(chat_id, "⏳ *[สภา AI กำลังประชุม]* กำลังเรียกทีมวิเคราะห์ 4 สาย และจัดโต้วาทีสด Bull vs Bear กรุณารอสักครู่ครับ...")
+        price = self.state_manager.get("last_price", 0.50)
+        cmo = self.state_manager.get("last_cmo", 0.0)
+        regime = self.state_manager.get("last_regime", "MEAN_REVERSION")
+        if getattr(self, "multi_agent_brain", None):
+            res = await self.multi_agent_brain.on_demand_analysis(self.symbol, price, cmo, regime)
+            await self.reply_to_telegram(chat_id, res)
+        else:
+            await self.reply_to_telegram(chat_id, "⚠️ Multi-Agent Brain module not loaded.")
 
     async def cmd_vault(self, chat_id: int) -> None:
         summary = self.profit_allocator.get_summary()
-        breaker_status = "🚨 TRIGGERED (Trading Locked)" if summary["daily_loss_limit_hit"] else "🟢 Normal (Active)"
+        breaker_status = "🚨 กำลังทำงาน (หยุดเทรดชั่วคราว)" if summary["daily_loss_limit_hit"] else "🟢 ปกติ (พร้อมเทรด)"
         msg = (
-            f"🏦 *AlphaScalp Capital Vault (1/3 Rule)*\n"
+            f"🏦 *AlphaScalp กองทุนรักษาต้นทุน (กฎ 1/3 Vault Rule)*\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"• *Safe Vault Balance (1/3):* `${summary['vault_balance']:.4f} USDT`\n"
-            f"• *Reinvest Compounded (2/3):* `${summary['reinvest_pool']:.4f} USDT`\n"
-            f"• *Total Realized Profit:* `${summary['total_realized_profit']:.4f} USDT`\n"
-            f"• *Total Realized Loss:* `${summary['total_realized_loss']:.4f} USDT`\n"
-            f"• *Daily Net PnL Today:* `${summary['daily_pnl']:.4f} USDT`\n"
-            f"• *Daily Circuit Breaker:* `{breaker_status}`\n"
-            f"• *Date (UTC):* `{summary['date']}`\n\n"
-            f"💡 *หลักการรักษาทุน:* ทุกไม้ที่ได้กำไร จะตัด 33.3% เข้า Vault สำรองทันที กำไรส่วนนี้ไม่มีวันถูกนำไปเสี่ยงเพิ่ม"
+            f"• *เงินสำรองปลอดภัย (Vault 1/3):* `${summary['vault_balance']:.4f} USDT`\n"
+            f"• *เงินหมุนเวียนทบต้น (Reinvest 2/3):* `${summary['reinvest_pool']:.4f} USDT`\n"
+            f"• *กำไรรวมที่ปิดแล้ว:* `+${summary['total_realized_profit']:.4f} USDT`\n"
+            f"• *ขาดทุนรวมที่ปิดแล้ว:* `-${summary['total_realized_loss']:.4f} USDT`\n"
+            f"• *PnL สุทธิประจำวันนี้:* `${summary['daily_pnl']:+.4f} USDT`\n"
+            f"• *ระบบตัดขาดทุนรายวัน (Circuit Breaker):* `{breaker_status}`\n"
+            f"• *วันที่คำนวณ (UTC):* `{summary['date']}`\n\n"
+            f"💡 *หลักการรักษาทุน:* ทุกไม้ที่ได้กำไร ระบบจะตัด 33.3% เข้า Vault สำรองทันที กำไรส่วนนี้ไม่มีวันถูกนำไปเสี่ยงเพิ่ม"
         )
         await self.reply_to_telegram(chat_id, msg)
 
@@ -452,7 +470,7 @@ class ScalpingBot:
         self.state_manager.set("bot_status", "paused")
         self.db_manager.log_message("WARNING", "Bot execution paused via Telegram /pause command.", "Telegram")
         msg = (
-            f"⏸️ *Bot Paused by User*\n"
+            f"⏸️ *สั่งหยุดพักระบบชั่วคราว (Bot Paused)*\n"
             f"ระบบหยุดพักการเปิดออเดอร์ใหม่เรียบร้อยครับ\n"
             f"• ออเดอร์ที่ถืออยู่ (ถ้ามี) ยังคงมีระบบ Trailing Stop และ Stop Loss ดูแลตามปกติ\n"
             f"• พิมพ์ **/resume** เพื่อให้บอทกลับมาสแกนและเทรดต่อ"
@@ -463,25 +481,25 @@ class ScalpingBot:
         self.state_manager.set("bot_status", "running")
         self.db_manager.log_message("INFO", "Bot execution resumed via Telegram /resume command.", "Telegram")
         msg = (
-            f"▶️ *Bot Resumed by User*\n"
+            f"▶️ *เริ่มการทำงานระบบต่อ (Bot Resumed)*\n"
             f"ระบบกลับมาทำงานและเปิดการสแกนหาจังหวะเทรดตามปกติแล้วครับ\n"
-            f"• Target Pair: `{self.symbol}`\n"
-            f"• Timeframe: `{self.timeframe}`"
+            f"• คู่เหรียญ: `{self.symbol}`\n"
+            f"• กรอบเวลา (Timeframe): `{self.timeframe}`"
         )
         await self.reply_to_telegram(chat_id, msg)
 
     async def cmd_closeall(self, chat_id: int) -> None:
-        await self.reply_to_telegram(chat_id, "🚨 *Executing Emergency Close All...* กำลังส่งคำสั่งปิดทุกไม้ทันที...")
+        await self.reply_to_telegram(chat_id, "🚨 *กำลังสั่งปิดทุกไม้ฉุกเฉิน...* ส่งคำสั่ง Market Order ทันที...")
         closed = await self.close_all_positions(symbol=self.symbol, reason="TELEGRAM_EMERGENCY_CLOSE")
         if closed:
-            await self.reply_to_telegram(chat_id, f"✅ *Emergency Close Completed*\nปิดทุกสัญญาของ {self.symbol} และยกเลิกออเดอร์ทั้งหมดเรียบร้อยครับ")
+            await self.reply_to_telegram(chat_id, f"✅ *ปิดทุกไม้ฉุกเฉินสำเร็จ (Emergency Close)*\nปิดทุกสัญญาของ {self.symbol} และยกเลิกออเดอร์ทั้งหมดเรียบร้อยแล้วครับ")
         else:
-            await self.reply_to_telegram(chat_id, f"ℹ️ *No Active Positions*\nไม่มีออเดอร์ค้างอยู่ให้ปิด หรือคำสั่งได้ถูกยกเลิกแล้วครับ")
+            await self.reply_to_telegram(chat_id, f"ℹ️ *ไม่มีออเดอร์ค้างอยู่*\nไม่มีสัญญาค้างอยู่ให้ปิด หรือคำสั่งได้ถูกยกเลิกแล้วครับ")
 
     async def cmd_status(self, chat_id: int) -> None:
         bot_status_raw = self.state_manager.get("bot_status", "unknown").upper()
-        mode_str = "Live Trading" if not self.dry_run else "Dry Run"
-        status_indicator = f"🟢 Active ({mode_str})" if bot_status_raw == "RUNNING" else f"🟡 {bot_status_raw.capitalize()}"
+        mode_str = "เทรดเงินจริง (Live Trading)" if not self.dry_run else "ทดสอบเสมือนจริง (Dry Run)"
+        status_indicator = f"🟢 เปิดทำงาน ({mode_str})" if bot_status_raw == "RUNNING" else f"🟡 หยุดพัก ({bot_status_raw.capitalize()})"
         
         def read_logs():
             engine_logs = []
@@ -533,17 +551,23 @@ class ScalpingBot:
                     
             formatted_logs = "\n".join([f"`{log}`" for log in engine_logs])
             if not formatted_logs:
-                formatted_logs = "`No active logs found.`"
+                formatted_logs = "`ไม่พบบันทึกประวัติล่าสุด`"
         except Exception:
-            formatted_logs = "`No active logs found.`"
+            formatted_logs = "`ไม่พบบันทึกประวัติล่าสุด`"
+
+        ai_engine = "Standby (รอใส่คีย์บน Render)"
+        if getattr(self, "multi_agent_brain", None) and self.multi_agent_brain.has_ai_key:
+            ai_engine = f"🟢 Active ({self.multi_agent_brain.client_type.upper()})"
 
         status_message = (
-            f"🤖 **AlphaScalp Core Heartbeat ({BOT_VERSION})**\n"
-            f"• **System Status:** {status_indicator}\n"
-            f"• **Target Pair:** {self.symbol} ({self.timeframe})\n"
-            f"• **AI Confidence Score:** `{self.last_confidence * 100:.1f}%`\n"
-            f"• **Active CMO Upper/Lower Thresholds:** `{self.state_manager.get('cmo_upper', 60.0)}` / `{self.state_manager.get('cmo_lower', -60.0)}`\n\n"
-            "📜 **ล่าสุด DECISION LOGS:**\n"
+            f"🤖 **AlphaScalp สถานะระบบ ({BOT_VERSION})**\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• **สถานะการทำงาน:** {status_indicator}\n"
+            f"• **คู่เหรียญเป้าหมาย:** {self.symbol} ({self.timeframe})\n"
+            f"• **สภา Multi-Agent AI:** {ai_engine}\n"
+            f"• **คะแนนความมั่นใจ AI:** `{self.last_confidence * 100:.1f}%`\n"
+            f"• **กรอบดัชนี CMO (บน/ล่าง):** `{self.state_manager.get('cmo_upper', 60.0)}` / `{self.state_manager.get('cmo_lower', -60.0)}`\n\n"
+            "📜 **บันทึกการตัดสินใจล่าสุด (DECISION LOGS):**\n"
             f"{formatted_logs}"
         )
         await self.reply_to_telegram(chat_id, status_message)
@@ -552,7 +576,7 @@ class ScalpingBot:
     async def cmd_balance(self, chat_id: int) -> None:
         if self.dry_run or not self.exchange:
             val = self.state_manager.get("balance", 10000.0)
-            await self.reply_to_telegram(chat_id, f"💵 *Wallet Balance (Dry Run)*\n• *Estimated Balance:* `${val:,.2f}`")
+            await self.reply_to_telegram(chat_id, f"💵 *ยอดเงินในพอร์ตจำลอง (Dry Run)*\n• *ยอดคงเหลือประเมิน:* `${val:,.2f} USDT`")
             return
             
         try:
@@ -570,14 +594,15 @@ class ScalpingBot:
             available_margin = balance_data.get('USDT', {}).get('free', 0.0)
             
             balance_msg = (
-                f"💰 *Bybit UTA Balance*\n"
-                f"• *Total Wallet Balance:* `${total_wallet_balance:,.2f}`\n"
-                f"• *Total Equity:* `${total_equity:,.2f}`\n"
-                f"• *Available Margin (USDT):* `${available_margin:,.2f}`"
+                f"💰 *ยอดเงินในบัญชี Bybit Unified (UTA)*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"• *ยอดรวมในกระเป๋า (Wallet Balance):* `${total_wallet_balance:,.2f} USDT`\n"
+                f"• *มูลค่าสุทธิของพอร์ต (Total Equity):* `${total_equity:,.2f} USDT`\n"
+                f"• *มาร์จิ้นที่ใช้ได้ (Available Margin):* `${available_margin:,.2f} USDT`"
             )
             await self.reply_to_telegram(chat_id, balance_msg)
         except Exception as e:
-            await self.reply_to_telegram(chat_id, f"❌ *Failed to fetch balance:* {e}")
+            await self.reply_to_telegram(chat_id, f"❌ *ไม่สามารถดึงข้อมูลยอดเงินได้:* `{e}`")
 
     async def cmd_position(self, chat_id: int) -> None:
         # Check local position
@@ -609,7 +634,7 @@ class ScalpingBot:
             current_price = 0.0
             
         if not has_local and not exchange_pos:
-            await self.reply_to_telegram(chat_id, f"📊 *Active Positions ({self.symbol})*\n• *Status:* No active positions.")
+            await self.reply_to_telegram(chat_id, f"📊 *สถานะการถือสัญญา ({self.symbol})*\n• *สถานะ:* ปัจจุบันไม่มีออเดอร์ค้างอยู่ครับ")
             return
             
         # Extract variables
@@ -633,20 +658,22 @@ class ScalpingBot:
             dist_sl = abs(stop_loss - current_price)
             dist_t1 = abs(target1 - current_price)
             
-            t1_status = "Hit ✅" if target1_hit else f"${target1:.2f} (Dist: ${dist_t1:.2f})"
-            sl_status = f"${stop_loss:.2f} (Dist: ${dist_sl:.2f})"
+            t1_status = "ถึงเป้าแล้ว ✅" if target1_hit else f"${target1:.4f} (ห่าง ${dist_t1:.4f})"
+            sl_status = f"${stop_loss:.4f} (ห่าง ${dist_sl:.4f})"
         else:
-            t1_status = "Not set locally"
-            sl_status = "Not set locally"
+            t1_status = "ไม่ได้กำหนด"
+            sl_status = "ไม่ได้กำหนด"
             
+        side_th = "ซื้อ (LONG)" if side == "BUY" else "ขาย (SHORT)"
         pos_msg = (
-            f"📊 *Active Position: {side} {self.symbol}*\n"
-            f"• *Size:* `{size:.4f}`\n"
-            f"• *Entry Price:* `${entry_price:.2f}`\n"
-            f"• *Current Price:* `${current_price:.2f}`\n"
-            f"• *Unrealized PnL:* `${pnl:.2f}`\n"
-            f"• *Stop Loss (SL):* `{sl_status}`\n"
-            f"• *Target 1 (TP1):* `{t1_status}`"
+            f"📊 *สถานะสัญญาปัจจุบัน: {side_th} {self.symbol}*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• *ขนาดสัญญา:* `{size:.4f} {self.symbol.split('/')[0]}`\n"
+            f"• *ราคาเข้าซื้อ:* `${entry_price:.4f}`\n"
+            f"• *ราคาตลาดปัจจุบัน:* `${current_price:.4f}`\n"
+            f"• *กำไร/ขาดทุนที่ยังไม่ปิด (Unrealized PnL):* `${pnl:+.4f} USDT`\n"
+            f"• *จุดตัดขาดทุน (Stop Loss):* `{sl_status}`\n"
+            f"• *เป้าทำกำไร (Take Profit 1):* `{t1_status}`"
         )
         await self.reply_to_telegram(chat_id, pos_msg)
 
@@ -665,15 +692,16 @@ class ScalpingBot:
             win_rate = (wins / total * 100) if total > 0 else 0.0
             
             stats_msg = (
-                f"📈 *Trade Statistics (SQLite)*\n"
-                f"• *Total Trades:* `{total}`\n"
-                f"• *Wins (Profit > 0):* `{wins}`\n"
-                f"• *Losses (Profit < 0):* `{losses}`\n"
-                f"• *Win Rate:* `{win_rate:.1f}%`"
+                f"📈 *สถิติผลการเทรดโดยรวม (Trade Statistics)*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"• *จำนวนรอบเทรดทั้งหมด:* `{total}` ไม้\n"
+                f"• *ชนะ (กำไร > 0):* `{wins}` ไม้\n"
+                f"• *แพ้ (ขาดทุน < 0):* `{losses}` ไม้\n"
+                f"• *อัตราการชนะ (Win Rate):* `{win_rate:.1f}%`"
             )
             await self.reply_to_telegram(chat_id, stats_msg)
         except Exception as e:
-            await self.reply_to_telegram(chat_id, f"❌ *Failed to query stats:* {e}")
+            await self.reply_to_telegram(chat_id, f"❌ *ไม่สามารถดึงข้อมูลสถิติได้:* `{e}`")
 
     # Advanced Resilient Network Request Wrapper for Windows 11
     async def execute_safe_ccxt_call(self, coro_func, *args, **kwargs):
@@ -690,38 +718,40 @@ class ScalpingBot:
                 await asyncio.sleep(attempt * 2)
 
     async def place_native_maker_tp_with_retry(self, symbol, side, amount, entry_price):
-        tp_pct = 0.004 if 'XRP' in symbol else 0.005
+        regime_cfg = RISK_CONTROL_REGIME.get('XRP_USDT', {})
+        tp_pct = regime_cfg.get('take_profit_pct', 0.012)
         tp_side = 'sell' if side.upper() == 'BUY' else 'buy'
         tp_price = round(entry_price * (1.0 + tp_pct), 4) if side.upper() == 'BUY' else round(entry_price * (1.0 - tp_pct), 4)
 
-        # Active Order Cleanup before placing new TP limit order
+        # Active Close Order Cleanup before placing new TP limit order (Never cancels entry orders)
         await self.order_manager.cancel_active_close_orders(symbol)
 
-        # Retry loop to allow Bybit exchange state to sync position
+        # Retry loop to verify position exists before sending reduceOnly
+        symbol_futures = symbol.replace('/', '')
         for attempt in range(1, 4):
             try:
-                await asyncio.sleep(0.5 * attempt) # Progressive backoff
-                # Verify position exists before sending reduceOnly
+                await asyncio.sleep(0.4 * attempt) # Progressive backoff
                 positions = await self.exchange.fetch_positions([symbol], params={'category': 'linear'})
                 pos_size = float(positions[0].get('contracts', 0) if positions else 0)
 
                 if pos_size > 0:
                     tp_params = {'category': 'linear', 'reduceOnly': True, 'postOnly': True}
                     order = await self.exchange.create_order(
-                        symbol=symbol,
+                        symbol=symbol_futures,
                         type='limit',
                         side=tp_side,
                         amount=amount,
                         price=tp_price,
                         params=tp_params
                     )
-                    logger.info(f"🎯 [NATIVE MAKER TP SUCCESS] Placed {tp_side} at {tp_price}")
+                    logger.info(f"🎯 [NATIVE MAKER TP SUCCESS] Placed {tp_side} at {tp_price} for {amount}")
                     if order and isinstance(order, dict) and 'id' in order:
                         self.state_manager.set_close_order_id(symbol, order['id'])
                     return order
             except Exception as tp_err:
                 logger.warning(f"⚠️ TP placement attempt {attempt} failed: {str(tp_err)}")
-        logger.error("❌ Failed to place Native Maker TP after 3 sync attempts.")
+        logger.warning("⚠️ Could not place Native Maker TP. Active tracker loop will handle TP/SL.")
+        return None
 
     def recalculate_stats(self):
         try:
@@ -736,18 +766,21 @@ class ScalpingBot:
             
             total = len(pnls)
             wins = sum(1 for p in pnls if p > 0)
+            losses = sum(1 for p in pnls if p < 0)
+            total_net_pnl = sum(pnls)
             win_rate = (wins / total * 100.0) if total > 0 else 0.0
             
             self.state_manager.update({
                 "trades_count": total,
-                "win_rate": win_rate
+                "win_rate": win_rate,
+                "pnl": round(total_net_pnl, 4)
             })
-            logger.info(f"📊 [STATS SYNC] Recalculated stats: Total Trades = {total}, Win Rate = {win_rate:.1f}%")
+            logger.info(f"📊 [STATS SYNC] Recalculated stats: Total Trades = {total}, Wins = {wins}, Losses = {losses}, Win Rate = {win_rate:.1f}%, Net PnL = {total_net_pnl:.4f}")
         except Exception as e:
             logger.error(f"❌ Failed to recalculate stats: {e}")
 
     async def get_available_balance(self) -> float:
-        """Fetch available margin balance from exchange. Fallback to state manager if dry run or fails."""
+        """Fetch available margin balance and total equity from Bybit UTA."""
         if self.dry_run or not self.exchange:
             val = self.state_manager.get("balance", 10000.0)
             self.available_capital = val
@@ -755,33 +788,43 @@ class ScalpingBot:
             self.wallet_total_equity = val
             return val
         
-        # Upgrade Bybit UTA Balance Retrieval Logic inside TradingEngine
+        # Robust Bybit UTA Balance Retrieval Logic
         try:
             uta_response = await self.execute_safe_ccxt_call(self.exchange.fetch_balance, params={'type': 'unified'})
 
-            # Parse using multiple fallback keys safely
             result_list = uta_response.get('info', {}).get('result', {}).get('list', [{}])[0]
 
             total_eq = safe_float(result_list.get('totalEquity'), 0.0)
             avail_bal = safe_float(result_list.get('totalAvailableBalance'), 0.0)
 
-            # Fallback to CCXT standardized array if native API info structure is empty
-            if avail_bal == 0.0 and 'USDT' in uta_response:
-                avail_bal = safe_float(uta_response['USDT'].get('free'), 0.0)
-                total_eq = safe_float(uta_response['USDT'].get('total'), 0.0)
+            # Robust fallback for Bybit UTA where totalAvailableBalance is empty string ""
+            if avail_bal == 0.0:
+                if 'USDT' in uta_response:
+                    avail_bal = safe_float(uta_response['USDT'].get('free'), 0.0)
+                if avail_bal == 0.0 and 'free' in uta_response and 'USDT' in uta_response.get('free', {}):
+                    avail_bal = safe_float(uta_response['free'].get('USDT'), 0.0)
+                if avail_bal == 0.0:
+                    avail_bal = safe_float(result_list.get('totalWalletBalance'), 0.0)
+
+            if total_eq == 0.0:
+                if 'USDT' in uta_response:
+                    total_eq = safe_float(uta_response['USDT'].get('total'), 0.0)
+                if total_eq == 0.0:
+                    total_eq = avail_bal
 
             self.wallet_total_equity = total_eq
             self.available_capital = avail_bal
             self.wallet_free_margin = avail_bal
-            logger.info(f"🔍 [UTA ONLINE SYNC] Verified Equity: {total_eq} USD | Free Margin: {avail_bal} USDT")
-            self.state_manager.set("balance", avail_bal)
+            logger.info(f"🔍 [UTA ONLINE SYNC] Verified Equity: {total_eq:.4f} USD | Free Margin: {avail_bal:.4f} USDT")
+            self.state_manager.update({"balance": avail_bal, "equity": total_eq})
             return avail_bal
         except Exception as uta_err:
             logger.error(f"❌ Failed to query clean Bybit UTA margins: {str(uta_err)}")
-            self.available_capital = 0.0
-            self.wallet_free_margin = 0.0
-            self.wallet_total_equity = 0.0
-            return self.state_manager.get("balance", 10000.0)
+            fallback_val = safe_float(self.state_manager.get("balance", 1.42), 1.42)
+            self.available_capital = fallback_val
+            self.wallet_free_margin = fallback_val
+            self.wallet_total_equity = fallback_val
+            return fallback_val
 
     def run_walk_forward_optimization(self) -> None:
         """Walk-Forward Optimizer executing every 24 hours to tune CMO thresholds based on 7-day rolling win rate."""
@@ -835,7 +878,13 @@ class ScalpingBot:
             )
             
             # Send Telegram alert for self-learning
-            opt_msg = f"⚙️ *[OPTIMIZER SELF-LEARNING]*\nWalk-Forward Optimization completed.\n• *7d Win Rate:* `{win_rate:.1f}%`\n• *New CMO thresholds:* `{cmo_lower}` / `{cmo_upper}`"
+            opt_msg = (
+                f"⚙️ *[ระบบเรียนรู้ปรับค่าอัตโนมัติ - Walk-Forward]*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"การปรับจูนพารามิเตอร์กลยุทธ์เสร็จสมบูรณ์แล้วครับ\n"
+                f"• *Win Rate ย้อนหลัง 7 วัน:* `{win_rate:.1f}%`\n"
+                f"• *ปรับกรอบค่า CMO ใหม่:* `{cmo_lower}` ถึง `{cmo_upper}`"
+            )
             try:
                 loop = asyncio.get_running_loop()
                 if loop.is_running():
@@ -1045,6 +1094,31 @@ class ScalpingBot:
                     decision_action = None  # Block opposite direction entries if currently in position
                     
             if decision_action and entry_side:
+                # 0. Multi-Agent AI Consensus Guard (TradingAgents Engine)
+                if getattr(self, "multi_agent_brain", None):
+                    ai_verdict = await self.multi_agent_brain.evaluate_trade(
+                        symbol=self.symbol,
+                        side=entry_side,
+                        current_price=close_price,
+                        cmo=latest_cmo,
+                        regime=latest_regime,
+                        atr=latest_atr
+                    )
+                    if not ai_verdict.get("approved", True):
+                        logger.info(f"🛡️ [MULTI-AGENT AI VETO] Trade {entry_side} rejected by AI Council: {ai_verdict.get('reason')}")
+                        self.db_manager.log_message("WARNING", f"Trade rejected by Multi-Agent AI Council: {ai_verdict.get('reason')}", "TradingEngine")
+                        if ai_verdict.get("telegram_message"):
+                            await self.send_telegram(ai_verdict["telegram_message"])
+                        return
+                    
+                    # Update confidence if provided by AI
+                    if "confidence" in ai_verdict:
+                        self.last_confidence = ai_verdict["confidence"]
+
+                    # Broadcast AI consensus approval message
+                    if ai_verdict.get("telegram_message"):
+                        await self.send_telegram(ai_verdict["telegram_message"])
+
                 # 1. Enforce Daily Circuit Breaker (Capital Preservation)
                 equity_now = getattr(self, "wallet_total_equity", 0.0) or getattr(self, "available_capital", 10.0)
                 can_trade, breaker_reason = self.profit_allocator.can_trade_today(equity_now)
@@ -1111,6 +1185,7 @@ class ScalpingBot:
                 # Execute Trade
                 self.db_manager.log_message("INFO", f"Executing Entry {entry_side}: Size={position_size:.4f}, Price={close_price:.2f}, SL={stop_loss:.2f}, Target1={target1:.2f}", "TradingEngine")
                 
+                entry_order_id = "DRY_RUN"
                 if not self.dry_run:
                     # Live Order execution via CCXT
                     try:
@@ -1133,13 +1208,9 @@ class ScalpingBot:
                             price=close_price,
                             params=order_params
                         )
-                        self.db_manager.log_message("INFO", f"Live entry order placed successfully. ID: {response['id']}", "TradingEngine")
-                        
-                        # Attach Immediate Maker Limit TP Order on Fill
-                        try:
-                            await self.place_native_maker_tp_with_retry(symbol_futures, entry_side, position_size, close_price)
-                        except Exception as tp_err:
-                            self.db_manager.log_message("WARNING", f"⚠️ Failed to place Native Maker TP: {tp_err}", "TradingEngine")
+                        entry_order_id = response.get('id', '')
+                        self.db_manager.log_message("INFO", f"Live entry order placed successfully. ID: {entry_order_id}", "TradingEngine")
+                        # Native Maker TP will be placed automatically by check_active_positions once position is confirmed filled on exchange.
                     except Exception as e:
                         self.db_manager.log_message("ERROR", f"Failed to place live order: {e}", "TradingEngine")
                         return
@@ -1182,7 +1253,10 @@ class ScalpingBot:
                         "last_entry_bar_index": latest_idx,
                         "last_entry_price": close_price,
                         "entry_features": brain_features,  # Save features for ML training
-                        "breakeven_locked": False
+                        "breakeven_locked": False,
+                        "entry_order_id": entry_order_id,
+                        "is_filled": True if self.dry_run else False,
+                        "tp_order_placed": False
                     }
                 
                 positions[self.symbol] = pos_data
@@ -1192,18 +1266,19 @@ class ScalpingBot:
                 
                 # Rich Telegram Alert Card
                 side_emoji = "🟢" if entry_side == "BUY" else "🔴"
+                side_th = "เปิด Long (ซื้อ)" if entry_side == "BUY" else "เปิด Short (ขาย)"
                 msg = (
-                    f"{side_emoji} *[SCALPING ENTRY - {entry_side}]*\n"
+                    f"{side_emoji} *[เปิดออเดอร์ใหม่ - {side_th}]*\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
-                    f"• *Symbol:* `{self.symbol}` ({self.timeframe})\n"
-                    f"• *Entry Price:* `${close_price:.4f}`\n"
-                    f"• *Position Size:* `{position_size:.2f} {self.symbol.split('/')[0]}` ({final_leverage}x)\n"
-                    f"• *Take Profit 1:* `${target1:.4f}`\n"
-                    f"• *Stop Loss:* `${stop_loss:.4f}`\n"
-                    f"• *AI Confidence:* `{self.last_confidence * 100:.1f}%`\n"
-                    f"• *Market Regime:* `{latest_regime}`\n"
-                    f"• *CMO Value:* `{latest_cmo:.1f}`\n"
-                    f"🛡️ *Breakeven Guard:* Active (+0.25% or 50% TP distance)"
+                    f"• *คู่เหรียญ:* `{self.symbol}` (กรอบเวลา {self.timeframe})\n"
+                    f"• *ราคาเข้าซื้อ:* `${close_price:.4f}`\n"
+                    f"• *ขนาดสัญญา:* `{position_size:.2f} {self.symbol.split('/')[0]}` (เลเวอเรจ {final_leverage}x)\n"
+                    f"• *เป้าทำกำไร (TP1):* `${target1:.4f}`\n"
+                    f"• *จุดตัดขาดทุน (SL):* `${stop_loss:.4f}`\n"
+                    f"• *ความมั่นใจโมเดล AI:* `{self.last_confidence * 100:.1f}%`\n"
+                    f"• *สภาวะตลาด (Market Regime):* `{latest_regime}`\n"
+                    f"• *ค่าดัชนี CMO:* `{latest_cmo:.1f}`\n"
+                    f"🛡️ *ระบบเลื่อน SL กันทุน:* เปิดทำงานอัตโนมัติ (+0.25% หรือ 50% ของระยะ TP)"
                 )
                 await self.send_telegram(msg)
                 
@@ -1220,40 +1295,53 @@ class ScalpingBot:
         alloc: dict,
         win_rate: float
     ) -> None:
-        """Sends rich telegram exit cards with 1/3 vault breakdown and circuit breaker alerts."""
+        """Sends rich telegram exit cards with 1/3 vault breakdown and circuit breaker alerts in Thai."""
+        exit_type_labels = {
+            "TAKE_PROFIT_1": "ทำกำไรไม้แรก 50% (TP1 Scale-Out)",
+            "TAKE_PROFIT_1 (Scale-Out 50%)": "ทำกำไรไม้แรก 50% (TP1 Scale-Out)",
+            "TAKE_PROFIT": "ทำกำไรตามเป้าหมาย (Take Profit)",
+            "STOP_LOSS": "ตัดขาดทุนตามแผน (Stop Loss)",
+            "TRAILING_STOP": "ล็อกกำไรตามรอบราคา (Trailing Stop)",
+            "TIME_BASED_EMERGENCY_RELEASE": "หมดเวลาถือครองฉุกเฉิน (Time-Based)",
+            "TELEGRAM_EMERGENCY_CLOSE": "สั่งปิดฉุกเฉินผ่าน Telegram",
+            "EMERGENCY_CIRCUIT_BREAKER": "เซอร์กิตเบรกเกอร์ตัดขาดทุนฉุกเฉิน"
+        }
+        exit_type_th = exit_type_labels.get(exit_type, exit_type)
+        side_th = "ฝั่ง LONG" if side == "BUY" else "ฝั่ง SHORT"
+
         if pnl > 0:
             vault_msg = (
-                f"🎯 *[PROFIT REALIZED - {exit_type}]*\n"
+                f"🎯 *[ปิดสถานะรับกำไร - {exit_type_th}]*\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"• *Symbol:* `{symbol}` ({side})\n"
-                f"• *Exit Price:* `${exit_price:.4f}`\n"
-                f"• *Net Profit:* `+${pnl:.4f} USDT`\n"
+                f"• *คู่เหรียญ:* `{symbol}` ({side_th})\n"
+                f"• *ราคาที่ปิดสถานะ:* `${exit_price:.4f}`\n"
+                f"• *กำไรสุทธิ:* `+${pnl:.4f} USDT`\n"
                 f"──────────────────\n"
-                f"🏦 *Capital Vault (1/3 เก็บปลอดภัย):* `+${alloc.get('vault_cut', 0.0):.4f} USDT`\n"
-                f"*(สะสมใน Vault รวม: ${alloc.get('total_vault', 0.0):.4f} USDT)*\n"
-                f"📈 *Reinvested (2/3 ทบต้นลุยต่อ):* `+${alloc.get('reinvest_cut', 0.0):.4f} USDT`\n"
-                f"• *Daily PnL วันนี้:* `${alloc.get('daily_pnl', 0.0):.4f} USDT`\n"
-                f"• *Win Rate:* `{win_rate:.1f}%`"
+                f"🏦 *จัดสรรเข้า Safe Vault (1/3 เก็บรักษาทุน):* `+${alloc.get('vault_cut', 0.0):.4f} USDT`\n"
+                f"*(สะสมใน Vault รวมทั้งหมด: ${alloc.get('total_vault', 0.0):.4f} USDT)*\n"
+                f"📈 *จัดสรรทบต้น (2/3 นำไปเทรดต่อ):* `+${alloc.get('reinvest_cut', 0.0):.4f} USDT`\n"
+                f"• *ผลตอบแทนรวมวันนี้ (Daily PnL):* `${alloc.get('daily_pnl', 0.0):.4f} USDT`\n"
+                f"• *อัตราการชนะ (Win Rate):* `{win_rate:.1f}%`"
             )
             await self.send_telegram(vault_msg)
         else:
             loss_msg = (
-                f"🛑 *[POSITION CLOSED - {exit_type}]*\n"
+                f"🛑 *[ปิดสถานะ - {exit_type_th}]*\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"• *Symbol:* `{symbol}` ({side})\n"
-                f"• *Exit Price:* `${exit_price:.4f}`\n"
-                f"• *PnL:* `${pnl:.4f} USDT`\n"
-                f"• *Daily PnL วันนี้:* `${alloc.get('daily_pnl', 0.0):.4f} USDT`\n"
-                f"• *Win Rate:* `{win_rate:.1f}%`"
+                f"• *คู่เหรียญ:* `{symbol}` ({side_th})\n"
+                f"• *ราคาที่ปิดสถานะ:* `${exit_price:.4f}`\n"
+                f"• *ผลลัพธ์รอบนี้ (PnL):* `${pnl:.4f} USDT`\n"
+                f"• *ผลตอบแทนรวมวันนี้ (Daily PnL):* `${alloc.get('daily_pnl', 0.0):.4f} USDT`\n"
+                f"• *อัตราการชนะ (Win Rate):* `{win_rate:.1f}%`"
             )
             await self.send_telegram(loss_msg)
 
         if alloc.get("daily_loss_limit_hit", False):
             breaker_msg = (
-                f"🚨 *[DAILY CIRCUIT BREAKER TRIGGERED]*\n"
+                f"🚨 *[เปิดใช้งานระบบพักการเทรดรายวัน - DAILY CIRCUIT BREAKER]*\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"ยอดขาดทุนสะสมวันนี้ (${alloc.get('daily_pnl', 0.0):.2f}) ถึงเกณฑ์ความเสี่ยงสูงสุด (-{PROFIT_ALLOCATION_CONFIG.get('daily_loss_limit_pct', 0.03)*100:.1f}%)!\n"
-                f"ระบบหยุดการเปิดออเดอร์ใหม่เพื่อรักษาทุนตลอดทั้งวันที่เหลือจนถึง 00:00 UTC"
+                f"🛡️ ระบบหยุดการเปิดออเดอร์ใหม่เพื่อรักษาทุนตลอดทั้งวันที่เหลือจนถึง 00:00 UTC"
             )
             await self.send_telegram(breaker_msg)
 
@@ -1288,17 +1376,65 @@ class ScalpingBot:
                 exchange_size = 0.0
                 if active_positions and len(active_positions) > 0:
                     current_pos = active_positions[0]
-                    pos_size = float(current_pos['contracts'])
-                    entry_px = float(current_pos['entryPrice'])
-                    unrealized_pnl = float(current_pos['unrealizedPnl'])
+                    pos_size = float(current_pos.get('contracts', 0.0) or 0.0)
+                    entry_px = float(current_pos.get('entryPrice', 0.0) or 0.0)
+                    unrealized_pnl = float(current_pos.get('unrealizedPnl', 0.0) or 0.0)
 
                     # Standardize dynamic internal state sync
                     self.current_position_size = pos_size
                     self.position_entry_price = entry_px
-                    
                     exchange_size = pos_size
 
-                if exchange_size == 0.0:
+                if exchange_size > 0.0:
+                    # Verified active position on exchange
+                    pos_data["is_filled"] = True
+                    pos_data["size"] = exchange_size
+                    if entry_px > 0:
+                        pos_data["entry_price"] = entry_px
+
+                    # Place Native Maker TP if not placed yet
+                    if not pos_data.get("tp_order_placed", False) and not pos_data.get("target1_hit", False):
+                        try:
+                            tp_order = await self.place_native_maker_tp_with_retry(
+                                self.symbol, pos_data["side"], pos_data["remaining_size"], pos_data["entry_price"]
+                            )
+                            if tp_order and isinstance(tp_order, dict) and 'id' in tp_order:
+                                pos_data["tp_order_placed"] = True
+                                pos_data["close_order_id"] = tp_order["id"]
+                                positions[self.symbol] = pos_data
+                                self.state_manager.set("positions", positions)
+                        except Exception as tp_err:
+                            logger.warning(f"⚠️ Failed to place initial Maker TP: {tp_err}")
+
+                elif exchange_size == 0.0:
+                    # 1. If position was NOT confirmed filled yet, check whether entry order is still pending or canceled
+                    if not pos_data.get("is_filled", False):
+                        entry_oid = pos_data.get("entry_order_id")
+                        is_still_pending = False
+                        if entry_oid and entry_oid != "DRY_RUN":
+                            try:
+                                ord_info = await self.exchange.fetch_order(entry_oid, self.symbol, params={'category': 'linear'})
+                                status = ord_info.get("status")
+                                if status in ["open", "new"]:
+                                    is_still_pending = True
+                                    logger.debug(f"⏳ Entry order {entry_oid} still pending on exchange book. Waiting for fill.")
+                                    return
+                                elif status in ["canceled", "cancelled", "expired", "rejected"]:
+                                    logger.info(f"ℹ️ [ENTRY EXPIRED] Entry order {entry_oid} was {status} on exchange without fill. Resetting state safely.")
+                                    self.state_manager.clear_active_position()
+                                    return
+                            except Exception as ord_chk_err:
+                                logger.debug(f"Order status check error: {ord_chk_err}")
+                        
+                        if is_still_pending:
+                            return
+                        else:
+                            # Entry order no longer open and never filled
+                            logger.info(f"ℹ️ [ENTRY PURGED] Entry order {entry_oid} not found or inactive with zero fill. Clearing state.")
+                            self.state_manager.clear_active_position()
+                            return
+
+                    # 2. If it WAS filled previously, it has truly closed on the exchange
                     self.db_manager.log_message("WARNING", f"Position for {self.symbol} is already closed on the exchange. Syncing local state.", "TradingEngine")
                     if pos_data and pos_data.get("size", 0.0) > 0:
                         try:
@@ -1313,63 +1449,61 @@ class ScalpingBot:
                         target1 = pos_data["target1"]
                         stop_loss = pos_data["stop_loss"]
                         regime = pos_data.get("regime", "UNKNOWN")
+                        pos_ts = pos_data.get("timestamp", 0.0)
                         
                         exit_price = current_price
                         exit_type = "EXCHANGE_CLOSE"
+                        matched_real_trade = False
                         
                         try:
-                            my_trades = await self.exchange.fetch_my_trades(self.symbol, limit=5)
+                            my_trades = await self.exchange.fetch_my_trades(self.symbol, limit=10, params={'category': 'linear'})
                             if my_trades:
                                 exit_side_expected = "sell" if side == "BUY" else "buy"
                                 for t in reversed(my_trades):
-                                    if t.get('side', '').lower() == exit_side_expected:
+                                    t_time = t.get('timestamp', 0) / 1000.0
+                                    # Strict timestamp guard: MUST be after entry order placement
+                                    if t.get('side', '').lower() == exit_side_expected and t_time >= (pos_ts - 5.0):
                                         exit_price = float(t.get('price', current_price))
+                                        matched_real_trade = True
                                         break
                         except Exception as trade_fetch_err:
                             logger.warning(f"⚠️ Could not fetch actual exit trade details: {trade_fetch_err}")
+
+                        if not matched_real_trade:
                             if side == "BUY":
-                                if current_price > 0.0 and abs(current_price - target1) < abs(current_price - stop_loss):
-                                    exit_price = target1
-                                    exit_type = "TAKE_PROFIT_1"
-                                else:
-                                    exit_price = stop_loss
-                                    exit_type = "STOP_LOSS"
+                                exit_price = target1 if (current_price > 0.0 and abs(current_price - target1) < abs(current_price - stop_loss)) else stop_loss
                             else:
-                                if current_price > 0.0 and abs(current_price - target1) < abs(current_price - stop_loss):
-                                    exit_price = target1
-                                    exit_type = "TAKE_PROFIT_1"
-                                else:
-                                    exit_price = stop_loss
-                                    exit_type = "STOP_LOSS"
-                                    
-                        pnl = remaining_size * (exit_price - entry_price) if side == "BUY" else remaining_size * (entry_price - exit_price)
-                        self.db_manager.log_trade(self.symbol, "SELL" if side == "BUY" else "BUY", exit_price, remaining_size, pnl, regime, exit_type)
-                        self.state_manager.record_closed_order(self.symbol, side, pnl, exit_type)
-                        logger.info(f"📊 [AUTO SYNC EXIT] Synced exit trade: {exit_type} at {exit_price:.4f}, PnL: {pnl:.4f}")
+                                exit_price = target1 if (current_price > 0.0 and abs(current_price - target1) < abs(current_price - stop_loss)) else stop_loss
+                                        
+                        gross_pnl, fees, net_pnl = calculate_net_pnl(side, entry_price, exit_price, remaining_size, maker_entry=True, maker_exit=False)
+                        self.db_manager.log_trade(self.symbol, "SELL" if side == "BUY" else "BUY", exit_price, remaining_size, net_pnl, regime, exit_type)
+                        self.state_manager.record_closed_order(self.symbol, side, net_pnl, exit_type)
+                        logger.info(f"📊 [AUTO SYNC EXIT] Synced exit trade: {exit_type} at {exit_price:.4f}, Gross: {gross_pnl:.4f}, Fees: {fees:.4f}, Net PnL: {net_pnl:.4f}")
                         
                         # Capital Vault Profit Allocation (1/3 Vault, 2/3 Reinvestment)
                         alloc = self.profit_allocator.allocate_trade(
-                            self.symbol, side, exit_price, pnl, exit_type,
+                            self.symbol, side, exit_price, net_pnl, exit_type,
                             current_equity=getattr(self, 'wallet_total_equity', 0.0)
                         )
                         self.recalculate_stats()
                         win_rate = self.state_manager.get("win_rate", 0.0)
-                        await self.send_exit_alert_card(self.symbol, side, exit_price, pnl, exit_type, alloc, win_rate)
+                        await self.send_exit_alert_card(self.symbol, side, exit_price, net_pnl, exit_type, alloc, win_rate)
                         
                         # Train Adaptive ML Agent & Notify
                         features = pos_data.get("entry_features")
                         if features:
-                            label = 1 if (pos_data.get("target1_hit", False) or pnl > 0) else 0
+                            label = 1 if (pos_data.get("target1_hit", False) or net_pnl > 0) else 0
                             self.brain.learn_one(features, label)
                             self.state_manager.set("brain_model_state", self.brain.get_state())
                             
-                            label_desc = "PROFITABLE (1)" if label == 1 else "UNPROFITABLE (0)"
+                            label_desc_th = "มีกำไร ✅" if label == 1 else "ไม่ทำกำไร ❌"
                             learn_msg = (
-                                f"🧠 *[AI BRAIN SELF-LEARNING]*\n"
-                                f"Learned from Bybit closed trade:\n"
-                                f"• *Features:* CMO={features.get('cmo'):.2f}, VWAP Dist={features.get('vwap_dist'):.2f}, Volatility={features.get('volatility'):.4f}\n"
-                                f"• *Outcome:* `{label_desc}`\n"
-                                f"• *Action:* Model updated."
+                                f"🧠 *[AI สมองกลเรียนรู้ข้อมูลใหม่]*\n"
+                                f"━━━━━━━━━━━━━━━━━━\n"
+                                f"บอทได้เรียนรู้จากออเดอร์ Bybit ที่เพิ่งปิด:\n"
+                                f"• *ตัวชี้วัดเข้าเทรด:* CMO={features.get('cmo'):.2f}, VWAP Dist={features.get('vwap_dist'):.2f}, Volatility={features.get('volatility'):.4f}\n"
+                                f"• *ผลลัพธ์รอบนี้:* `{label_desc_th}`\n"
+                                f"• *การดำเนินการ:* อัปเดตโครงสร้างโมเดล AI สำเร็จเรียบร้อยครับ"
                             )
                             await self.send_telegram(learn_msg)
                             
@@ -1417,13 +1551,13 @@ class ScalpingBot:
                             self.state_manager.set("positions", positions)
                             self.db_manager.log_message("INFO", f"🛡️ [BREAKEVEN GUARD] Long SL moved to {be_stop:.4f} to lock in risk-free position.", "TradingEngine")
                             be_msg = (
-                                f"🛡️ *[BREAKEVEN PROTECTION ACTIVATED]*\n"
+                                f"🛡️ *[เปิดใช้งานระบบเลื่อน SL กันทุน (Breakeven Guard)]*\n"
                                 f"━━━━━━━━━━━━━━━━━━\n"
-                                f"• *Symbol:* `{self.symbol}` (LONG)\n"
-                                f"• *Entry Price:* `${entry_price:.4f}`\n"
-                                f"• *Current High:* `${current_high:.4f}` (+{gain_pct * 100:.2f}%)\n"
-                                f"• *New Protected SL:* `${be_stop:.4f}` (Above Entry!)\n"
-                                f"🎉 *Status:* Risk-free trade locked in. ทุนปลอดภัย 100%!"
+                                f"• *คู่เหรียญ:* `{self.symbol}` (ฝั่ง LONG)\n"
+                                f"• *ราคาเข้าซื้อ:* `${entry_price:.4f}`\n"
+                                f"• *ราคาสูงสุดที่ทำได้:* `${current_high:.4f}` (+{gain_pct * 100:.2f}%)\n"
+                                f"• *ขยับ SL ใหม่มาที่:* `${be_stop:.4f}` (สูงกว่าราคาเข้าซื้อ)\n"
+                                f"🎉 *สถานะ:* ปลอดความเสี่ยงแล้วครับ ล็อกต้นทุนปลอดภัย 100%!"
                             )
                             await self.send_telegram(be_msg)
                 else: # SELL
@@ -1439,13 +1573,13 @@ class ScalpingBot:
                             self.state_manager.set("positions", positions)
                             self.db_manager.log_message("INFO", f"🛡️ [BREAKEVEN GUARD] Short SL moved to {be_stop:.4f} to lock in risk-free position.", "TradingEngine")
                             be_msg = (
-                                f"🛡️ *[BREAKEVEN PROTECTION ACTIVATED]*\n"
+                                f"🛡️ *[เปิดใช้งานระบบเลื่อน SL กันทุน (Breakeven Guard)]*\n"
                                 f"━━━━━━━━━━━━━━━━━━\n"
-                                f"• *Symbol:* `{self.symbol}` (SHORT)\n"
-                                f"• *Entry Price:* `${entry_price:.4f}`\n"
-                                f"• *Current Low:* `${current_low:.4f}` (+{gain_pct * 100:.2f}%)\n"
-                                f"• *New Protected SL:* `${be_stop:.4f}` (Below Entry!)\n"
-                                f"🎉 *Status:* Risk-free trade locked in. ทุนปลอดภัย 100%!"
+                                f"• *คู่เหรียญ:* `{self.symbol}` (ฝั่ง SHORT)\n"
+                                f"• *ราคาเข้าซื้อ:* `${entry_price:.4f}`\n"
+                                f"• *ราคาต่ำสุดที่ทำได้:* `${current_low:.4f}` (+{gain_pct * 100:.2f}%)\n"
+                                f"• *ขยับ SL ใหม่มาที่:* `${be_stop:.4f}` (ต่ำกว่าราคาเข้าซื้อ)\n"
+                                f"🎉 *สถานะ:* ปลอดความเสี่ยงแล้วครับ ล็อกต้นทุนปลอดภัย 100%!"
                             )
                             await self.send_telegram(be_msg)
 
@@ -1460,7 +1594,8 @@ class ScalpingBot:
                 if hit:
                     close_size = size * 0.5
                     new_remaining = remaining_size - close_size
-                    pnl = close_size * (target1 - entry_price) if side == "BUY" else close_size * (entry_price - target1)
+                    gross_pnl, fees, net_pnl = calculate_net_pnl(side, entry_price, target1, close_size, maker_entry=True, maker_exit=False)
+                    pnl = net_pnl
                     
                     self.db_manager.log_message("INFO", f"Target 1 Hit at {target1:.2f}. Scaling out 50% ({close_size:.4f})", "TradingEngine")
                     
@@ -1534,7 +1669,8 @@ class ScalpingBot:
                 if is_sl_hit or is_ts_hit:
                     exit_price = stop_loss if is_sl_hit else trailing_stop
                     exit_type = "STOP_LOSS" if is_sl_hit else "TRAILING_STOP"
-                    pnl = remaining_size * (exit_price - entry_price)
+                    gross_pnl, fees, net_pnl = calculate_net_pnl(side, entry_price, exit_price, remaining_size, maker_entry=True, maker_exit=False)
+                    pnl = net_pnl
                     
                     self.db_manager.log_message("INFO", f"Long Position Closed via {exit_type} at {exit_price:.2f}", "TradingEngine")
                     
@@ -1589,13 +1725,14 @@ class ScalpingBot:
                         self.brain.learn_one(features, label)
                         self.state_manager.set("brain_model_state", self.brain.get_state())
                         
-                        label_desc = "PROFITABLE (1)" if label == 1 else "UNPROFITABLE (0)"
+                        label_desc_th = "มีกำไร ✅" if label == 1 else "ไม่ทำกำไร ❌"
                         learn_msg = (
-                            f"🧠 *[AI BRAIN SELF-LEARNING]*\n"
-                            f"Learned from closed Long trade:\n"
-                            f"• *Features:* CMO={features.get('cmo'):.2f}, VWAP Dist={features.get('vwap_dist'):.2f}, Volatility={features.get('volatility'):.4f}\n"
-                            f"• *Outcome:* `{label_desc}`\n"
-                            f"• *Action:* Model updated."
+                            f"🧠 *[AI สมองกลเรียนรู้ข้อมูลใหม่]*\n"
+                            f"━━━━━━━━━━━━━━━━━━\n"
+                            f"บอทได้เรียนรู้จากออเดอร์ Long ที่เพิ่งปิด:\n"
+                            f"• *ตัวชี้วัดเข้าเทรด:* CMO={features.get('cmo'):.2f}, VWAP Dist={features.get('vwap_dist'):.2f}, Volatility={features.get('volatility'):.4f}\n"
+                            f"• *ผลลัพธ์รอบนี้:* `{label_desc_th}`\n"
+                            f"• *การดำเนินการ:* อัปเดตโครงสร้างโมเดล AI สำเร็จเรียบร้อยครับ"
                         )
                         await self.send_telegram(learn_msg)
                         
@@ -1619,7 +1756,8 @@ class ScalpingBot:
                 if is_sl_hit or is_ts_hit:
                     exit_price = stop_loss if is_sl_hit else trailing_stop
                     exit_type = "STOP_LOSS" if is_sl_hit else "TRAILING_STOP"
-                    pnl = remaining_size * (entry_price - exit_price)
+                    gross_pnl, fees, net_pnl = calculate_net_pnl(side, entry_price, exit_price, remaining_size, maker_entry=True, maker_exit=False)
+                    pnl = net_pnl
                     
                     self.db_manager.log_message("INFO", f"Short Position Closed via {exit_type} at {exit_price:.2f}", "TradingEngine")
                     
@@ -1673,13 +1811,14 @@ class ScalpingBot:
                         self.brain.learn_one(features, label)
                         self.state_manager.set("brain_model_state", self.brain.get_state())
                         
-                        label_desc = "PROFITABLE (1)" if label == 1 else "UNPROFITABLE (0)"
+                        label_desc_th = "มีกำไร ✅" if label == 1 else "ไม่ทำกำไร ❌"
                         learn_msg = (
-                            f"🧠 *[AI BRAIN SELF-LEARNING]*\n"
-                            f"Learned from closed Short trade:\n"
-                            f"• *Features:* CMO={features.get('cmo'):.2f}, VWAP Dist={features.get('vwap_dist'):.2f}, Volatility={features.get('volatility'):.4f}\n"
-                            f"• *Outcome:* `{label_desc}`\n"
-                            f"• *Action:* Model updated."
+                            f"🧠 *[AI สมองกลเรียนรู้ข้อมูลใหม่]*\n"
+                            f"━━━━━━━━━━━━━━━━━━\n"
+                            f"บอทได้เรียนรู้จากออเดอร์ Short ที่เพิ่งปิด:\n"
+                            f"• *ตัวชี้วัดเข้าเทรด:* CMO={features.get('cmo'):.2f}, VWAP Dist={features.get('vwap_dist'):.2f}, Volatility={features.get('volatility'):.4f}\n"
+                            f"• *ผลลัพธ์รอบนี้:* `{label_desc_th}`\n"
+                            f"• *การดำเนินการ:* อัปเดตโครงสร้างโมเดล AI สำเร็จเรียบร้อยครับ"
                         )
                         await self.send_telegram(learn_msg)
                         
@@ -1780,12 +1919,15 @@ class ScalpingBot:
         self.state_manager.set("bot_status", "running")
         
         # Send Telegram alert on start
+        mode_str = "ทดสอบเสมือนจริง (Dry Run)" if self.dry_run else "เทรดเงินจริง (Live Trading)"
         start_msg = (
-            f"🚀 *Scalping Bot Started ({BOT_VERSION})*\n"
-            f"• *Symbol:* `{self.symbol}`\n"
-            f"• *Timeframe:* `{self.timeframe}`\n"
-            f"• *Dry Run:* `{self.dry_run}`\n"
-            f"• *Leverage:* `{self.leverage}x`"
+            f"🚀 *ระบบ AlphaScalp เริ่มทำงานแล้วครับ ({BOT_VERSION})*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• *คู่เหรียญเป้าหมาย:* `{self.symbol}`\n"
+            f"• *กรอบเวลา (Timeframe):* `{self.timeframe}`\n"
+            f"• *โหมดการทำงาน:* `{mode_str}`\n"
+            f"• *เลเวอเรจ (Leverage):* `{self.leverage}x`\n"
+            f"• *สถานะความพร้อม:* สแกนหาจังหวะเทรดตลอด 24 ชม."
         )
         await self.send_telegram(start_msg)
         # Spawn the Telegram Polling Loop as a background task

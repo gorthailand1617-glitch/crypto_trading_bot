@@ -102,12 +102,16 @@ def sync_live_balance():
 
         # Extract the actual available equity or total wallet balance in USDT (UTA)
         try:
-            list_entry = balance_data['info']['result']['list'][0]
-            available_balance = list_entry.get('totalEquity') or list_entry.get('totalWalletBalance')
-            if available_balance is not None:
-                available_balance = float(available_balance)
+            list_entry = balance_data.get('info', {}).get('result', {}).get('list', [{}])[0]
+            raw_bal = list_entry.get('totalEquity') or list_entry.get('totalWalletBalance')
+            if raw_bal and str(raw_bal).strip():
+                available_balance = float(raw_bal)
+            elif 'USDT' in balance_data.get('total', {}):
+                available_balance = float(balance_data['total']['USDT'])
+            elif 'free' in balance_data and 'USDT' in balance_data.get('free', {}):
+                available_balance = float(balance_data['free']['USDT'])
             else:
-                raise ValueError("No equity or wallet balance fields found in Bybit list")
+                available_balance = 1.42
         except Exception:
             if 'USDT' in balance_data.get('total', {}):
                 available_balance = float(balance_data['total']['USDT'])
@@ -116,11 +120,16 @@ def sync_live_balance():
 
         try:
             st.session_state.live_balance = available_balance
+            # Keep StateManager and state.json synchronized
+            StateManager().update({"balance": available_balance, "equity": available_balance})
         except Exception:
             pass
     except Exception as e:
         print(f"[BALANCE SYNC NOTICE] Bybit UTA sync: {e}")
-        available_balance = 1.42
+        try:
+            available_balance = float(StateManager().get("balance", 1.42))
+        except Exception:
+            available_balance = 1.42
         try:
             st.session_state.live_balance = available_balance
         except Exception:
@@ -253,7 +262,7 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
             st._global_connection_cache["bot_status"] = new_status
             
         if '/sync_balance' in self.path:
-            asyncio.run(sync_live_balance())
+            sync_live_balance()
 
         if '/clear_logs' in self.path:
             db_manager = DBManager()

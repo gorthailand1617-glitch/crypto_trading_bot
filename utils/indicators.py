@@ -93,3 +93,36 @@ def calculate_ema(df: pd.DataFrame, period: int = 200) -> pd.Series:
     """
     return df['close'].ewm(span=period, adjust=False).mean()
 
+
+def calculate_net_pnl(
+    side: str,
+    entry_price: float,
+    exit_price: float,
+    size: float,
+    maker_entry: bool = True,
+    maker_exit: bool = False
+) -> tuple[float, float, float]:
+    """
+    Calculates Gross PnL, Total Exchange Fees, and Net PnL.
+    Bybit linear futures standard fee regime:
+    - Maker fee = 0.02% (0.0002)
+    - Taker fee = 0.055% (0.00055)
+    Returns: (gross_pnl, total_fees, net_pnl)
+    """
+    side_upper = side.upper()
+    if side_upper in ["BUY", "LONG"]:
+        gross_pnl = size * (exit_price - entry_price)
+    else:
+        gross_pnl = size * (entry_price - exit_price)
+
+    entry_fee_rate = 0.0002 if maker_entry else 0.00055
+    exit_fee_rate = 0.0002 if maker_exit else 0.00055
+
+    entry_fee = (entry_price * size) * entry_fee_rate
+    exit_fee = (exit_price * size) * exit_fee_rate
+    total_fees = entry_fee + exit_fee
+
+    net_pnl = gross_pnl - total_fees
+    return gross_pnl, total_fees, net_pnl
+
+
