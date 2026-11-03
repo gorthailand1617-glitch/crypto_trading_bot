@@ -56,7 +56,9 @@ class MultiAgentBrain:
     def _call_gemini_rest(self, prompt: str, system_prompt: str = "") -> Tuple[str, str]:
         """Direct REST call to Google Gemini with model fallback and error parsing."""
         key = self.google_key
-        models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+        custom_model = os.getenv("GEMINI_MODEL", "").strip()
+        default_models = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.1-pro-preview"]
+        models = [custom_model] + [m for m in default_models if m != custom_model] if custom_model else default_models
         full_text = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
         payload = {"contents": [{"parts": [{"text": full_text}]}]}
         data = json.dumps(payload).encode("utf-8")
