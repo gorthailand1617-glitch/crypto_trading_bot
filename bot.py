@@ -610,6 +610,8 @@ class ScalpingBot:
 
         if res.get("has_signal") and res.get("telegram_message"):
             await self.reply_to_telegram(chat_id, res["telegram_message"])
+        elif res.get("error") and res.get("telegram_message"):
+            await self.reply_to_telegram(chat_id, res["telegram_message"])
         else:
             reason = res.get("reason", "สภาวะตลาดขณะนี้ยังไม่มีเหรียญใดที่สถิติเข้าเกณฑ์ความมั่นใจระดับสูง (>= 80%)")
             await self.reply_to_telegram(
@@ -685,56 +687,88 @@ class ScalpingBot:
 
     async def scan_market_candidates(self, symbols: List[str] = None) -> List[Dict[str, Any]]:
         """
-        Scans candidate crypto futures pairs on Bybit with fast non-blocking calls,
-        calculates CMO, ATR %, 24h change %, and Volume Spikes for each.
+        Scans candidate crypto futures pairs on Bybit with fast bulk ticker retrieval and resilient fallback.
+        Calculates CMO, ATR %, 24h change %, and Volume Spikes for each.
         """
         sym_list = symbols if symbols else getattr(self, "candidate_symbols", [
             "XRP/USDT", "SOL/USDT", "DOGE/USDT", "SUI/USDT", "BTC/USDT", "ETH/USDT", "ADA/USDT", "AVAX/USDT"
         ])
         results = []
 
+        # Step 1: Fast bulk ticker fetch (all coins in one single network roundtrip)
+        bulk_tickers = {}
+        try:
+            formatted_syms = [s if ":" in s else f"{s}:USDT" for s in sym_list]
+            bulk_tickers = await asyncio.wait_for(
+                self.exchange.fetch_tickers(formatted_syms, params={'category': 'linear'}),
+                timeout=7.0
+            )
+        except Exception as e:
+            logger.debug(f"Bulk ticker fetch fallback: {e}")
+
         async def fetch_one(sym: str):
             try:
-                # Fast direct ticker fetch with 3.5s timeout
-                ticker = await asyncio.wait_for(
-                    self.exchange.fetch_ticker(sym, params={'category': 'linear'}),
-                    timeout=3.5
-                )
+                # Retrieve ticker from bulk cache or individual fallback
+                ticker = bulk_tickers.get(sym) or bulk_tickers.get(f"{sym}:USDT")
+                if not ticker:
+                    try:
+                        ticker = await asyncio.wait_for(
+                            self.exchange.fetch_ticker(sym, params={'category': 'linear'}),
+                            timeout=5.0
+                        )
+                    except Exception:
+                        ticker = {}
+
                 last_price = safe_float(ticker.get("last", 0.0))
                 change_24h = safe_float(ticker.get("percentage", 0.0))
                 quote_vol = safe_float(ticker.get("quoteVolume", 0.0))
 
-                formatted_symbol = sym.replace('/', '').split(':')[0]
-                candles = await asyncio.wait_for(
-                    self.exchange.fetch_ohlcv(
-                        symbol=formatted_symbol,
-                        timeframe=self.timeframe,
-                        limit=30,
-                        params={'category': 'linear'}
-                    ),
-                    timeout=3.5
-                )
-                if not candles or len(candles) < 15:
+                if last_price <= 0:
                     return None
 
-                df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
-                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                # Default fallback technical metrics if OHLCV is slow
+                high_24h = safe_float(ticker.get("high", last_price))
+                low_24h = safe_float(ticker.get("low", last_price))
+                est_atr_pct = float(((high_24h - low_24h) / 8.0) / (last_price + 1e-9) * 100.0) if high_24h > low_24h else 1.5
 
-                cmo_series = calculate_cmo(df)
-                latest_cmo = float(cmo_series.iloc[-1]) if not cmo_series.empty else 0.0
-                regimes = classify_market_regime(df)
-                latest_regime = regimes.iloc[-1] if not regimes.empty else "RANGE"
+                latest_cmo = 0.0
+                latest_regime = "TRENDING_UP" if change_24h > 1.0 else ("TRENDING_DOWN" if change_24h < -1.0 else "RANGE")
+                atr_pct = est_atr_pct
+                vol_spike = 1.0
 
-                high = df["high"]
-                low = df["low"]
-                close_prev = df["close"].shift(1)
-                tr = pd.concat([high - low, (high - close_prev).abs(), (low - close_prev).abs()], axis=1).max(axis=1)
-                atr_14 = tr.rolling(window=14).mean().iloc[-1]
-                atr_pct = (atr_14 / (last_price + 1e-9)) * 100.0
+                # Step 2: Attempt OHLCV retrieval with safety timeout (do NOT discard if timeout)
+                try:
+                    formatted_symbol = sym.replace('/', '').split(':')[0]
+                    candles = await asyncio.wait_for(
+                        self.exchange.fetch_ohlcv(
+                            symbol=formatted_symbol,
+                            timeframe=self.timeframe,
+                            limit=30,
+                            params={'category': 'linear'}
+                        ),
+                        timeout=5.0
+                    )
+                    if candles and len(candles) >= 15:
+                        df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
 
-                vol_sma = df["volume"].rolling(window=14).mean().iloc[-1]
-                last_vol = df["volume"].iloc[-1]
-                vol_spike = float(last_vol / (vol_sma + 1e-9))
+                        cmo_series = calculate_cmo(df)
+                        latest_cmo = float(cmo_series.iloc[-1]) if not cmo_series.empty else 0.0
+                        regimes = classify_market_regime(df)
+                        latest_regime = regimes.iloc[-1] if not regimes.empty else "RANGE"
+
+                        high = df["high"]
+                        low = df["low"]
+                        close_prev = df["close"].shift(1)
+                        tr = pd.concat([high - low, (high - close_prev).abs(), (low - close_prev).abs()], axis=1).max(axis=1)
+                        atr_14 = tr.rolling(window=14).mean().iloc[-1]
+                        atr_pct = (atr_14 / (last_price + 1e-9)) * 100.0
+
+                        vol_sma = df["volume"].rolling(window=14).mean().iloc[-1]
+                        last_vol = df["volume"].iloc[-1]
+                        vol_spike = float(last_vol / (vol_sma + 1e-9))
+                except Exception as candle_err:
+                    logger.debug(f"Candle fetch fallback for {sym}: {candle_err}")
 
                 return {
                     "symbol": sym,
