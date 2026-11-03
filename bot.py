@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 from dotenv import load_dotenv
 
@@ -39,7 +40,7 @@ def _patched_connector_init(self, *args, **kwargs):
 aiohttp.TCPConnector.__init__ = _patched_connector_init
 
 from functools import wraps
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Tuple, Union
 import dotenv
 import pandas as pd
 import ccxt.async_support as ccxt
