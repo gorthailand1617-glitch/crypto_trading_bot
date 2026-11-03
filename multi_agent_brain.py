@@ -54,11 +54,11 @@ class MultiAgentBrain:
             self.client_type = None
 
     def _call_gemini_rest(self, prompt: str, system_prompt: str = "") -> Tuple[str, str]:
-        """Direct REST call to Google Gemini with model fallback and error parsing."""
+        """Direct REST call to Google Gemini with fast model fallback and error parsing."""
         key = self.google_key
         custom_model = os.getenv("GEMINI_MODEL", "").strip()
-        default_models = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.1-pro-preview"]
-        models = [custom_model] + [m for m in default_models if m != custom_model] if custom_model else default_models
+        default_models = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"]
+        models = [custom_model] if custom_model else default_models
         full_text = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
         payload = {"contents": [{"parts": [{"text": full_text}]}]}
         data = json.dumps(payload).encode("utf-8")
@@ -68,13 +68,16 @@ class MultiAgentBrain:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
             req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
             try:
-                with urllib.request.urlopen(req, timeout=15) as resp:
+                logger.info(f"🧠 [MULTI-AGENT AI] Invoking Gemini model: {model}...")
+                with urllib.request.urlopen(req, timeout=10) as resp:
                     res_json = json.loads(resp.read().decode("utf-8"))
                     candidates = res_json.get("candidates", [])
                     if candidates:
                         parts = candidates[0].get("content", {}).get("parts", [])
                         if parts:
-                            return parts[0].get("text", "").strip(), ""
+                            ans = parts[0].get("text", "").strip()
+                            logger.info(f"✅ [MULTI-AGENT AI] Successfully received response from {model} ({len(ans)} chars)")
+                            return ans, ""
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode("utf-8", errors="ignore")
                 msg = str(e)
@@ -84,10 +87,13 @@ class MultiAgentBrain:
                 except Exception:
                     pass
                 last_err = f"HTTP {e.code}: {msg}"
-                if e.code == 400 and ("API_KEY_INVALID" in err_body or "not valid" in err_body.lower()):
-                    return "", f"API Key ไม่ถูกต้อง ({msg})"
+                logger.warning(f"⚠️ [GEMINI {model} FAILED] {last_err}")
+                # Hard fail immediately on auth errors - don't keep user waiting
+                if e.code in [400, 401, 403]:
+                    return "", f"API Error (HTTP {e.code}): {msg}"
             except Exception as e:
                 last_err = str(e)
+                logger.warning(f"⚠️ [GEMINI {model} EXCEPTION] {last_err}")
 
         return "", last_err
 

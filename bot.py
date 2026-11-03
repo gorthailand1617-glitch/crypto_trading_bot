@@ -250,17 +250,24 @@ class ScalpingBot:
         asyncio.create_task(self.send_telegram_alert_resilient(message))
 
     async def reply_to_telegram(self, chat_id: int, text: str) -> None:
-        """Sends a response message back to the user via Telegram."""
+        """Sends a response message back to the user via Telegram with resilient plain-text fallback."""
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+        # Truncate to Telegram's 4000 character limit to prevent hard 400 rejection
+        if len(text) > 4000:
+            text = text[:3980] + "\n... (ตัดตอน)"
+
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=5) as response:
+                async with session.post(url, json=payload, timeout=10) as response:
                     if response.status != 200:
                         resp_text = await response.text()
-                        print(f"[TELEGRAM ERROR] Failed reply: {resp_text}")
+                        logger.warning(f"[TELEGRAM MARKDOWN FAILED] {resp_text}. Retrying in plain text...")
+                        # Fallback without parse_mode to guarantee delivery
+                        plain_payload = {"chat_id": chat_id, "text": text}
+                        await session.post(url, json=plain_payload, timeout=10)
         except Exception as e:
-            print(f"[TELEGRAM ERROR] Exception in reply: {e}")
+            logger.error(f"[TELEGRAM ERROR] Exception in reply: {e}")
 
     async def security_check(self, chat_id: int) -> bool:
         """Strict chat ID security filtering."""
