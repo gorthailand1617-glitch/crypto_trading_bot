@@ -491,3 +491,151 @@ Return EXACT JSON ONLY (no other markdown or extra text):
                     f"• พิมพ์ **/hunt trade** เพื่อเริ่มเทรด"
                 )
             }
+
+    async def evaluate_binance_th_spot_signal(self, candidates: List[Dict[str, Any]], usd_thb_rate: float = 35.8) -> Dict[str, Any]:
+        """
+        Multi-Agent Council deliberates on candidate coins specifically for MANUAL SPOT TRADING on Binance TH.
+        Filters strictly for High-Conviction (Confidence >= 80%) Spot Buy setups
+        with exact Entry, TP1, TP2, and SL prices in both USDT and THB.
+        """
+        self.reload_keys()
+        if not self.has_ai_key:
+            return {
+                "has_signal": False,
+                "error": "No AI Key configured",
+                "telegram_message": "⚠️ ยังไม่พบคีย์ AI บนระบบ Render ครับ กรุณาตั้งค่า `GOOGLE_API_KEY` ก่อนครับ"
+            }
+
+        if not candidates:
+            return {
+                "has_signal": False,
+                "error": "No candidates",
+                "telegram_message": "⚠️ ไม่พบข้อมูลตลาดของคู่เหรียญในขณะนี้ครับ"
+            }
+
+        candidates_summary = []
+        for i, c in enumerate(candidates, 1):
+            sym = c.get("symbol", "").split("/")[0]
+            px = c.get("price", 0.0)
+            chg = c.get("change_24h", 0.0)
+            cmo = c.get("cmo", 0.0)
+            atr_pct = c.get("atr_pct", 0.0)
+            vol_spike = c.get("vol_spike", 1.0)
+            regime = c.get("regime", "UNKNOWN")
+            candidates_summary.append(
+                f"{i}. {sym}: Price=${px:.4f} (~{px*usd_thb_rate:,.2f} THB) | 24h={chg:+.2f}% | CMO={cmo:.1f} | ATR%={atr_pct:.2f}% | VolSpike={vol_spike:.2f}x | Regime={regime}"
+            )
+
+        prompt = f"""
+You are the Supreme Trading Council of TradingAgents acting as an AI Copilot for a human trader on Binance.th (Spot Market).
+Your mission: Identify if there is an ELITE Grade-A+ SPOT BUY (buying spot low to sell high) setup among the coins below.
+
+Candidate Live Data:
+{chr(10).join(candidates_summary)}
+
+Strict Quality Criteria:
+1. Direction: MUST be SPOT BUY (Long). Do NOT recommend Short/Sell since this is Spot trading.
+2. Confidence Gate: Only approve if Council Confidence is >= 80%. If no coin meets >= 80% confidence, return "has_signal": false.
+3. Realistic Targets: Provide clean Entry Zone (range), TP1 (conservative +1.5% to +2.5%), TP2 (stretch +3% to +6%), and Stop Loss (-1.0% to -2.0%).
+
+Output EXACT JSON format only (no markdown, no backticks, no other text):
+{{
+  "has_signal": true,
+  "coin": "SOL",
+  "confidence": 88,
+  "entry_min_usd": 91.50,
+  "entry_max_usd": 91.80,
+  "tp1_usd": 93.30,
+  "tp1_pct": 1.8,
+  "tp2_usd": 94.60,
+  "tp2_pct": 3.2,
+  "sl_usd": 90.40,
+  "sl_pct": 1.3,
+  "bull_rationale": "สรุปมุมมองเทคนิคสั้นๆ 1 ประโยค เช่น CMO ดีดตัวจากเขต Oversold พร้อมวอลุ่มหนุน",
+  "risk_verdict_th": "คำตัดสิน Risk Emperor สั้นๆ 1 ประโยค สรุปเหตุผลว่าทำไมจังหวะนี้ถึงน่าเข้าเทรดเองบน Binance.th"
+}}
+"""
+        system_prompt = "You are TradingAgents Elite Spot Advisor for Binance.th. Strictly filter for Grade-A+ Spot Buys. Return only valid JSON."
+        raw_resp, err = await self._call_llm(prompt, system_prompt)
+        if not raw_resp:
+            return {"has_signal": False, "error": err, "telegram_message": f"❌ ไม่สามารถติดต่อสมอง AI ได้: {err}"}
+
+        try:
+            cleaned = raw_resp.strip()
+            if "```json" in cleaned:
+                cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
+            elif "```" in cleaned:
+                cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+            parsed = json.loads(cleaned)
+
+            if not parsed.get("has_signal", False):
+                return {
+                    "has_signal": False,
+                    "reason": "สภาวะตลาดขณะนี้ยังไม่มีเหรียญใดที่สถิติเข้าเกณฑ์ความมั่นใจระดับสูง (>= 80%)"
+                }
+
+            coin = parsed.get("coin", "BTC").upper().replace("/USDT", "").strip()
+            conf = int(parsed.get("confidence", 80))
+            if conf < 80:
+                return {"has_signal": False, "reason": f"คะแนนความมั่นใจ {conf}% ยังไม่ถึงเกณฑ์ความปลอดภัย 80%"}
+
+            e_min = float(parsed.get("entry_min_usd", 0.0))
+            e_max = float(parsed.get("entry_max_usd", e_min))
+            tp1 = float(parsed.get("tp1_usd", 0.0))
+            tp1_pct = float(parsed.get("tp1_pct", 1.8))
+            tp2 = float(parsed.get("tp2_usd", 0.0))
+            tp2_pct = float(parsed.get("tp2_pct", 3.2))
+            sl = float(parsed.get("sl_usd", 0.0))
+            sl_pct = float(parsed.get("sl_pct", 1.3))
+            bull = parsed.get("bull_rationale", "โมเมนตัมกำลังกลับตัวขึ้นชัดเจน")
+            decree = parsed.get("risk_verdict_th", "สัญญาณเกรด A+ อัตราส่วนกำไรคุ้มค่าความเสี่ยง เหมาะแก่การเข้าทำกำไร")
+
+            e_min_thb = e_min * usd_thb_rate
+            e_max_thb = e_max * usd_thb_rate
+            tp1_thb = tp1 * usd_thb_rate
+            tp2_thb = tp2 * usd_thb_rate
+            sl_thb = sl * usd_thb_rate
+
+            def fmt_usd(val):
+                return f"{val:,.4f}" if val < 1.0 else f"{val:,.2f}"
+
+            def fmt_thb(val):
+                return f"{val:,.3f}" if val < 1.0 else f"{val:,.2f}"
+
+            tg_msg = (
+                f"🔔 *[สัญญาณสภา AI เกรด A+ สำหรับเทรดเองบน Binance.th]*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"• *คู่เหรียญ:* `{coin}/THB` (หรือ `{coin}/USDT`)\n"
+                f"• *ทิศทาง:* 🟢 **แนะนำเข้าซื้อ (Spot Buy)**\n"
+                f"• *ระดับความมั่นใจ AI:* `{conf}%` (High Conviction)\n"
+                f"──────────────────\n"
+                f"💵 *โซนราคาเข้าซื้อ (Entry Zone):*\n"
+                f"• `${fmt_usd(e_min)} - ${fmt_usd(e_max)} USDT`\n"
+                f"• *(ประมาณ {fmt_thb(e_min_thb)} - {fmt_thb(e_max_thb)} บาท)*\n\n"
+                f"🎯 *เป้าหมายขายทำกำไร (Take Profit):*\n"
+                f"• **TP 1 (แบ่งขาย 50%):** `${fmt_usd(tp1)}` *(~{fmt_thb(tp1_thb)} บ. | +{tp1_pct:.1f}%)*\n"
+                f"• **TP 2 (รันเทรนด์):** `${fmt_usd(tp2)}` *(~{fmt_thb(tp2_thb)} บ. | +{tp2_pct:.1f}%)*\n\n"
+                f"🛑 *จุดตัดขาดทุนแนะนำ (Stop Loss):*\n"
+                f"• `${fmt_usd(sl)}` *(~{fmt_thb(sl_thb)} บ. | -{sl_pct:.1f}%)*\n"
+                f"──────────────────\n"
+                f"⚔️ *เหตุผลและมติสภา AI:*\n"
+                f"• 🐂 *Bull:* _{bull}_\n"
+                f"• 👑 *Risk Emperor:* _{decree}_\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💡 *เปิดแอป Binance TH เพื่อพิจารณาเข้าเทรดด้วยตนเองตามแผนนี้ได้เลยครับ*"
+            )
+
+            return {
+                "has_signal": True,
+                "coin": coin,
+                "confidence": conf,
+                "entry_min_usd": e_min,
+                "entry_max_usd": e_max,
+                "tp1_usd": tp1,
+                "tp2_usd": tp2,
+                "sl_usd": sl,
+                "telegram_message": tg_msg
+            }
+        except Exception as e:
+            logger.warning(f"[BINANCE TH SPOT SIGNAL PARSE ERROR] {e}")
+            return {"has_signal": False, "error": str(e), "telegram_message": ""}

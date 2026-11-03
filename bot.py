@@ -200,6 +200,12 @@ class ScalpingBot:
         self.auto_hunt = os.getenv("AUTO_HUNT", "false").strip().lower() in ["true", "1", "yes"]
         raw_candidates = os.getenv("CANDIDATE_PAIRS", "XRP/USDT,SOL/USDT,DOGE/USDT,SUI/USDT,BTC/USDT,ETH/USDT,ADA/USDT,AVAX/USDT")
         self.candidate_symbols = [s.strip() for s in raw_candidates.split(",") if s.strip()]
+
+        # Binance TH AI Signal Radar (Copilot for Manual Spot Trading)
+        self.radar_enabled = os.getenv("RADAR_BINANCE_TH", "true").strip().lower() in ["true", "1", "yes"]
+        self.last_radar_signal_time = 0.0
+        self.last_radar_coin = ""
+        self.usd_thb_rate = safe_float(os.getenv("USD_THB_RATE", "35.8"), 35.8)
         
         # Set default CMO thresholds in state if they do not exist (stricter -65.0 for XRP Long)
         if self.state_manager.get("cmo_upper") is None:
@@ -391,8 +397,10 @@ class ScalpingBot:
                 "🤖 *AlphaScalp Control Center (V6.0)*\n"
                 "สวัสดีครับครูกอร์! ระบบพร้อมทำงาน 100% ครับ\n\n"
                 "💡 *คำสั่งหลักที่ใช้งานได้ทันที:*\n"
+                "• **/signal** (หรือ **/binance**) : 🔔 ขอสัญญาณเข้าซื้อเกรด A+ สำหรับเทรดเองบน Binance.th\n"
+                "• **/radar on** : 📡 เปิดระบบเรดาร์แจ้งเตือนสัญญาณ Binance.th อัตโนมัติ\n"
                 "• **/scan** (หรือ **/hunt**) : 🎯 สั่งสภา AI สแกนทุกเหรียญเพื่อเฟ้นหาคู่ที่กำไรเร็วที่สุด\n"
-                "• **/autohunt on** : 🔄 เปิดโหมดสแกนและสลับเทรดเหรียญเร็วอัตโนมัติ\n"
+                "• **/autohunt on** : 🔄 เปิดโหมดสแกนและสลับเทรดเหรียญเร็วอัตโนมัติบน Bybit\n"
                 "• **/status** : ตรวจเช็คสถานะระบบและสัญญาณ Heartbeat\n"
                 "• **/balance** : ดึงยอดเงินสดบน Bybit\n"
                 "• **/help** : ดูรายการคำสั่งทั้งหมด"
@@ -427,12 +435,14 @@ class ScalpingBot:
             help_message = (
                 "🤖 **AlphaScalp Control Center (V6.0)**\n"
                 "ครูกอร์สามารถพิมพ์คำสั่งเหล่านี้เพื่อสั่งงานระบบได้ครับ:\n\n"
+                "• **/signal** (หรือ **/binance**) : 🔔 ขอสัญญาณเข้าซื้อเกรด A+ สำหรับเทรดเองบน Binance.th\n"
+                "• **/radar on/off** : 📡 เปิด/ปิดระบบเรดาร์แจ้งเตือนสัญญาณ Binance.th อัตโนมัติ\n"
+                "• **/hunt** (หรือ **/scan**) : 🎯 ให้สภา AI สแกนทุกเหรียญเพื่อเฟ้นหาคู่ที่กำไรเร็วและสูงที่สุด\n"
+                "• **/hunt trade** : ⚡ สั่งให้สภา AI สแกนเลือกเหรียญที่ดีที่สุดแล้วยิงออเดอร์ Bybit ทันที\n"
+                "• **/autohunt on/off** : 🔄 เปิด/ปิดโหมดสแกนและสลับเทรดเหรียญเร็วอัตโนมัติบน Bybit\n"
                 "• **/status** : ตรวจเช็คสถานะระบบปฏิบัติการและสัญญาณ Heartbeat\n"
                 "• **/balance** : ดึงยอดเงินสดจริงบน Bybit UTA แบบ Real-time\n"
-                "• **/position** : ตรวจสอบตำแหน่งสัญญาที่เปิดค้างอยู่\n"
-                "• **/hunt** (หรือ **/scan**) : 🎯 ให้สภา AI สแกนทุกเหรียญเพื่อเฟ้นหาคู่ที่กำไรเร็วและสูงที่สุด\n"
-                "• **/hunt trade** : ⚡ สั่งให้สภา AI สแกนเลือกเหรียญที่ดีที่สุดแล้วยิงออเดอร์ทันที\n"
-                "• **/autohunt on/off** : 🔄 เปิด/ปิดโหมดสแกนและสลับเทรดเหรียญเร็วอัตโนมัติ\n"
+                "• **/position** : ตรวจสอบตำแหน่งสัญญา Bybit ที่เปิดค้างอยู่\n"
                 "• **/vault** : 🏦 ตรวจสอบยอดเงินกองทุนสะสมรักษาทุน (1/3 Vault Rule)\n"
                 "• **/stats** : สรุปจำนวนรอบและเปอร์เซ็นต์ Win Rate จากฐานข้อมูล\n"
                 "• **/ai** : 🧠 เรียกสภา Multi-Agent AI วิเคราะห์เหรียญปัจจุบัน\n"
@@ -466,6 +476,10 @@ class ScalpingBot:
             if has_scan_in_tokens:
                 await asyncio.sleep(0.5)
                 await self.cmd_hunt(chat_id, "")
+        elif command in ["/signal", "/signals", "/binance", "/signal_th", "/spot"]:
+            await self.cmd_signal_th(chat_id)
+        elif command in ["/radar", "/radar_th"]:
+            await self.cmd_radar(chat_id, sub_arg)
         else:
             await self.reply_to_telegram(chat_id, f"❓ ไม่รู้จักคำสั่ง `{command}` ครับ พิมพ์ **/help** เพื่อดูรายการคำสั่งทั้งหมด")
 
@@ -570,6 +584,103 @@ class ScalpingBot:
                 f"• พิมพ์ **/autohunt off** เพื่อปิดและเทรดเฉพาะ `{self.symbol}`\n"
                 f"• พิมพ์ **/hunt** เพื่อสแกนดูผลคัดเลือกเหรียญด้วยตนเอง"
             )
+
+    async def cmd_signal_th(self, chat_id: int) -> None:
+        """On-demand Binance.th Spot Signal evaluation requested by user."""
+        await self.reply_to_telegram(
+            chat_id,
+            "🔍 *[สภา AI กำลังสแกนหาจังหวะเทรดสำหรับ Binance.th]*\n"
+            "กำลังวิเคราะห์หาคู่เหรียญที่มีสัญญาณเข้าซื้อ (Spot Buy) เกรด A+ พร้อมคำนวณจุดเข้า/ออกเป็นเงินบาท กรุณารอสักครู่ครับ..."
+        )
+
+        candidates = await self.scan_market_candidates()
+        if not candidates:
+            await self.reply_to_telegram(chat_id, "⚠️ ไม่สามารถดึงข้อมูลตลาดได้ในขณะนี้ กรุณาลองใหม่อีกครั้งครับ")
+            return
+
+        if not getattr(self, "multi_agent_brain", None):
+            await self.reply_to_telegram(chat_id, "⚠️ Multi-Agent Brain module not loaded.")
+            return
+
+        res = await self.multi_agent_brain.evaluate_binance_th_spot_signal(
+            candidates=candidates,
+            usd_thb_rate=getattr(self, "usd_thb_rate", 35.8)
+        )
+
+        if res.get("has_signal") and res.get("telegram_message"):
+            await self.reply_to_telegram(chat_id, res["telegram_message"])
+        else:
+            reason = res.get("reason", "สภาวะตลาดขณะนี้ยังไม่มีเหรียญใดที่สถิติเข้าเกณฑ์ความมั่นใจระดับสูง (>= 80%)")
+            await self.reply_to_telegram(
+                chat_id,
+                f"ℹ️ *[ยังไม่พบจังหวะเกรด A+ สำหรับ Binance.th ในขณะนี้]*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"• *คำวินิจฉัยสภา AI:* _{reason}_\n"
+                f"• *เกณฑ์ความปลอดภัย:* สภา AI จะอนุมัติเฉพาะสัญญาณที่มีความมั่นใจ $\\ge 80\\%$ ขึ้นไปเท่านั้น เพื่อรักษาทุนของครูกอร์ให้ปลอดภัย\n\n"
+                f"💡 *คำแนะนำ:* แนะนำรอจังหวะใหม่ หรือเปิดเรดาร์ไว้ด้วยคำสั่ง **/radar on** ระบบจะคอยเฝ้าตลาดและเด้งเตือนทันทีเมื่อมีจังหวะคมๆ เกิดขึ้นครับ"
+            )
+
+    async def cmd_radar(self, chat_id: int, sub_arg: str = "") -> None:
+        """Toggle or check Binance.th signal radar status."""
+        if sub_arg in ["on", "enable", "start"]:
+            self.radar_enabled = True
+            self.state_manager.set("radar_binance_th", True)
+            await self.reply_to_telegram(
+                chat_id,
+                "🟢 *[เปิดเรดาร์สัญญาณ Binance.th สำเร็จ]*\n"
+                "สภา AI จะคอยสแกนตลาดและส่งสัญญาณเกรด A+ (ความมั่นใจ 80%+) เข้า Telegram ให้อัตโนมัติ เพื่อให้ครูกอร์นำไปพิจารณาเทรดเองครับ!"
+            )
+        elif sub_arg in ["off", "disable", "stop"]:
+            self.radar_enabled = False
+            self.state_manager.set("radar_binance_th", False)
+            await self.reply_to_telegram(
+                chat_id,
+                "🔴 *[ปิดเรดาร์สัญญาณ Binance.th ชั่วคราว]*\n"
+                "ระบบจะหยุดส่งสัญญาณแจ้งเตือนอัตโนมัติ (แต่ยังสามารถพิมพ์ **/signal** เพื่อเรียกดูสัญญาณแบบแมนนวลได้ตลอดเวลาครับ)"
+            )
+        else:
+            status_th = "🟢 เปิดทำงาน (Active)" if getattr(self, "radar_enabled", True) else "🔴 ปิดอยู่ (Disabled)"
+            await self.reply_to_telegram(
+                chat_id,
+                f"📡 *[สถานะเรดาร์สัญญาณ Binance.th]*: {status_th}\n\n"
+                f"• พิมพ์ **/radar on** เพื่อเปิดการแจ้งเตือนสัญญาณเข้า Telegram อัตโนมัติ\n"
+                f"• พิมพ์ **/radar off** เพื่อปิดการแจ้งเตือนอัตโนมัติ\n"
+                f"• พิมพ์ **/signal** เพื่อสั่งสแกนและขอสัญญาณสดทันที"
+            )
+
+    async def binance_th_radar_loop(self) -> None:
+        """
+        Background autonomous loop that scans for Grade-A+ Spot signals for Binance.th
+        and alerts the user via Telegram without interfering with Bybit trading.
+        """
+        logger.info("📡 [BINANCE TH RADAR] Background signal radar engine started.")
+        # Wait 30 seconds after startup before first scan
+        await asyncio.sleep(30)
+        while True:
+            try:
+                if getattr(self, "radar_enabled", True) and getattr(self, "multi_agent_brain", None):
+                    now = time.time()
+                    # Cooldown check: at least 30 minutes between automated broadcasts
+                    if (now - getattr(self, "last_radar_signal_time", 0)) >= 1800:
+                        candidates = await self.scan_market_candidates()
+                        if candidates:
+                            signal_res = await self.multi_agent_brain.evaluate_binance_th_spot_signal(
+                                candidates=candidates,
+                                usd_thb_rate=getattr(self, "usd_thb_rate", 35.8)
+                            )
+                            if signal_res.get("has_signal") and signal_res.get("telegram_message"):
+                                coin = signal_res.get("coin", "")
+                                if coin != getattr(self, "last_radar_coin", "") or (now - getattr(self, "last_radar_signal_time", 0)) >= 3600:
+                                    logger.info(f"🎯 [BINANCE TH RADAR] Dispatched Grade-A+ signal for {coin}")
+                                    await self.send_telegram(signal_res["telegram_message"])
+                                    self.last_radar_signal_time = now
+                                    self.last_radar_coin = coin
+                await asyncio.sleep(180)
+            except asyncio.CancelledError:
+                break
+            except Exception as radar_err:
+                logger.debug(f"[BINANCE TH RADAR LOOP] {radar_err}")
+                await asyncio.sleep(60)
 
     async def scan_market_candidates(self, symbols: List[str] = None) -> List[Dict[str, Any]]:
         """
@@ -2231,8 +2342,9 @@ class ScalpingBot:
             f"• *สถานะความพร้อม:* สแกนหาจังหวะเทรดตลอด 24 ชม."
         )
         await self.send_telegram(start_msg)
-        # Spawn the Telegram Polling Loop as a background task
+        # Spawn the Telegram Polling Loop and Binance TH Radar as background tasks
         telegram_task = asyncio.create_task(self.telegram_polling_loop())
+        radar_task = asyncio.create_task(self.binance_th_radar_loop())
 
         # Start Healthcheck Web Server for Cloud / Render if PORT is provided
         http_runner = None
@@ -2294,9 +2406,10 @@ class ScalpingBot:
         finally:
             if http_runner:
                 await http_runner.cleanup()
-            # Gracefully cancel Telegram task on shutdown
+            # Gracefully cancel background tasks on shutdown
             telegram_task.cancel()
-            await asyncio.gather(telegram_task, return_exceptions=True)
+            radar_task.cancel()
+            await asyncio.gather(telegram_task, radar_task, return_exceptions=True)
             if self.exchange:
                 await self.exchange.close()
             self.db_manager.log_message("INFO", "Scalping Bot stopped.", "TradingEngine")
