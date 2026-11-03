@@ -40,8 +40,97 @@ RISK_CONTROL_REGIME = {
         'cmo_overbought_short': 60.0,
         'max_notional_exposure': 50.0,
         'margin_shield_threshold_pct': 0.70
+    },
+    'DOGE_USDT': {
+        'leverage': 5,
+        'min_position_size': 10.0,
+        'take_profit_pct': 0.018,
+        'stop_loss_pct': 0.010,
+        'max_hold_kline': 6,
+        'order_params': {'postOnly': True, 'category': 'linear'},
+        'cmo_oversold_long': -65.0,
+        'cmo_overbought_short': 60.0,
+        'max_notional_exposure': 50.0,
+        'margin_shield_threshold_pct': 0.70
+    },
+    'SUI_USDT': {
+        'leverage': 5,
+        'min_position_size': 1.0,
+        'take_profit_pct': 0.018,
+        'stop_loss_pct': 0.010,
+        'max_hold_kline': 6,
+        'order_params': {'postOnly': True, 'category': 'linear'},
+        'cmo_oversold_long': -60.0,
+        'cmo_overbought_short': 60.0,
+        'max_notional_exposure': 50.0,
+        'margin_shield_threshold_pct': 0.70
+    },
+    'PEPE_USDT': {
+        'leverage': 5,
+        'min_position_size': 10000.0,
+        'take_profit_pct': 0.020,
+        'stop_loss_pct': 0.012,
+        'max_hold_kline': 6,
+        'order_params': {'postOnly': True, 'category': 'linear'},
+        'cmo_oversold_long': -65.0,
+        'cmo_overbought_short': 60.0,
+        'max_notional_exposure': 50.0,
+        'margin_shield_threshold_pct': 0.70
+    },
+    'BTC_USDT': {
+        'leverage': 5,
+        'min_position_size': 0.001,
+        'take_profit_pct': 0.010,
+        'stop_loss_pct': 0.006,
+        'max_hold_kline': 6,
+        'order_params': {'postOnly': True, 'category': 'linear'},
+        'cmo_oversold_long': -60.0,
+        'cmo_overbought_short': 60.0,
+        'max_notional_exposure': 50.0,
+        'margin_shield_threshold_pct': 0.70
+    },
+    'ETH_USDT': {
+        'leverage': 5,
+        'min_position_size': 0.01,
+        'take_profit_pct': 0.012,
+        'stop_loss_pct': 0.008,
+        'max_hold_kline': 6,
+        'order_params': {'postOnly': True, 'category': 'linear'},
+        'cmo_oversold_long': -60.0,
+        'cmo_overbought_short': 60.0,
+        'max_notional_exposure': 50.0,
+        'margin_shield_threshold_pct': 0.70
+    },
+    'ADA_USDT': {
+        'leverage': 5,
+        'min_position_size': 5.0,
+        'take_profit_pct': 0.015,
+        'stop_loss_pct': 0.010,
+        'max_hold_kline': 6,
+        'order_params': {'postOnly': True, 'category': 'linear'},
+        'cmo_oversold_long': -65.0,
+        'cmo_overbought_short': 60.0,
+        'max_notional_exposure': 50.0,
+        'margin_shield_threshold_pct': 0.70
+    },
+    'DEFAULT': {
+        'leverage': 5,
+        'min_position_size': 1.0,
+        'take_profit_pct': 0.015,
+        'stop_loss_pct': 0.010,
+        'max_hold_kline': 6,
+        'order_params': {'postOnly': True, 'category': 'linear'},
+        'cmo_oversold_long': -60.0,
+        'cmo_overbought_short': 60.0,
+        'max_notional_exposure': 50.0,
+        'margin_shield_threshold_pct': 0.70
     }
 }
+
+def get_regime_config(symbol: str) -> dict:
+    """Safely retrieves risk control parameters for any symbol with default fallback."""
+    clean = symbol.replace('/', '_').split(':')[0].upper()
+    return RISK_CONTROL_REGIME.get(clean, RISK_CONTROL_REGIME['DEFAULT'])
 
 MARGIN_SHIELD_CONFIG = {
     'emergency_drawdown_pct': 0.70,  # 70% of isolated margin triggers emergency cut

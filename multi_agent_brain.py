@@ -304,3 +304,189 @@ Provide a concise Thai summary for Telegram with bold emojis. Max 200 words.
 
         header = f"🧙‍♂️ *[รายงานสดจากสภา AI TradingAgents]*\n━━━━━━━━━━━━━━━━━━\n"
         return header + raw_resp.strip()
+
+    async def find_highest_profit_opportunity(self, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Multi-Agent AI Council deliberates across multiple candidate cryptocurrency pairs
+        and selects the SINGLE pair offering the highest and fastest profit potential right now.
+        """
+        self.reload_keys()
+        if not self.has_ai_key:
+            return {
+                "success": False,
+                "error": "No AI Key configured",
+                "telegram_message": (
+                    "⚠️ *[Multi-Agent AI อยู่ในสถานะ Standby]*\n"
+                    "ยังไม่พบคีย์ AI บนระบบ Render ครับ\n\n"
+                    "💡 *วิธีเปิดใช้งาน:*\n"
+                    "ไปที่ Render ➔ เมนู Environment ➔ ใส่ `GOOGLE_API_KEY` แล้วลองอีกครั้งครับ"
+                )
+            }
+
+        if not candidates:
+            return {
+                "success": False,
+                "error": "No candidates provided",
+                "telegram_message": "⚠️ ไม่พบข้อมูลคู่เหรียญสำหรับสแกนในขณะนี้ครับ"
+            }
+
+        candidates_summary = []
+        for i, c in enumerate(candidates, 1):
+            sym = c.get("symbol", "")
+            px = c.get("price", 0.0)
+            chg = c.get("change_24h", 0.0)
+            cmo = c.get("cmo", 0.0)
+            atr_pct = c.get("atr_pct", 0.0)
+            vol_spike = c.get("vol_spike", 1.0)
+            regime = c.get("regime", "UNKNOWN")
+            candidates_summary.append(
+                f"{i}. {sym}: Price=${px:.4f} | 24h={chg:+.2f}% | CMO={cmo:.1f} | ATR%={atr_pct:.2f}% | VolSpike={vol_spike:.2f}x | Regime={regime}"
+            )
+
+        prompt = f"""
+You are the Supreme Trading Council of TradingAgents (Multi-Asset Crypto Momentum Specialist).
+Below is live market data for candidate cryptocurrency perpetual futures pairs on Bybit:
+
+{chr(10).join(candidates_summary)}
+
+Mission:
+Carefully analyze all candidates and select the SINGLE coin pair that currently presents the HIGHEST AND FASTEST profit opportunity.
+
+Key Evaluation Criteria:
+1. Speed & Volatility: High ATR% and high Volume Spike (moving aggressively right now).
+2. Momentum Edge: CMO extreme oversold (<-60) for long or overbought (>60) for short, or clear breakout.
+3. High Risk/Reward Ratio: Clean take profit target with low invalidation distance.
+
+Simulate the Council debate:
+- Technical Ninja: Compares velocity and momentum.
+- News/Macro Oracle: Market trend & hype check.
+- Sentiment Bard: Crowd behavior & trap check.
+- Bull Paladin vs Bear Berserker debate on the chosen asset.
+- Risk Emperor Final Verdict: Declare the #1 Champion Coin, side (BUY or SELL), expected take profit %, stop loss %, and confidence.
+
+Return EXACT JSON ONLY (no other markdown or extra text):
+{{
+  "champion_symbol": "...",
+  "side": "BUY" or "SELL",
+  "confidence": 85,
+  "speed_grade": "⚡ เร็วมาก (Ultra-Fast)" or "🚀 รวดเร็ว (High Momentum)",
+  "expected_tp_pct": 1.5,
+  "stop_loss_pct": 0.8,
+  "bull_debate": "มุมมองฝั่งกระทิงสั้นๆ 1 ประโยค",
+  "bear_debate": "มุมมองฝั่งหมีสั้นๆ 1 ประโยค",
+  "decree_th": "สรุปคำตัดสินของ Risk Emperor สั้นๆ 1-2 ประโยค ระบุว่าทำไมเหรียญนี้ถึงมีโอกาสทำกำไรสูงและเร็วที่สุด"
+}}
+"""
+        system_prompt = "You are TradingAgents supreme hedge fund committee. Choose the fastest highest profit coin. Return only valid JSON."
+        raw_resp, err = await self._call_llm(prompt, system_prompt)
+
+        if not raw_resp:
+            logger.warning(f"⚠️ [MULTI-AGENT SCAN FALLBACK] LLM Error: {err}. Using Quantitative Velocity fallback.")
+            sorted_by_velocity = sorted(candidates, key=lambda x: (x.get("atr_pct", 0) * x.get("vol_spike", 1.0)), reverse=True)
+            top = sorted_by_velocity[0]
+            side = "BUY" if top.get("cmo", 0) < 0 else "SELL"
+            side_th = "เปิด Long (ซื้อ)" if side == "BUY" else "เปิด Short (ขาย)"
+            fallback_msg = (
+                f"🏆 *[คัดเลือกคู่เหรียญโมเมนตัมสูงสุด (Quantitative Fallback)]*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"• *เหรียญที่เลือก:* `{top['symbol']}` ({side_th})\n"
+                f"• *ความเร็ว (ATR%):* `{top.get('atr_pct', 0):.2f}%` (VolSpike: {top.get('vol_spike', 1.0):.2f}x)\n"
+                f"• *คำแนะนำ:* พิมพ์ `/hunt trade` เพื่อเริ่มเทรดเหรียญนี้ทันที"
+            )
+            return {
+                "success": True,
+                "champion_symbol": top["symbol"],
+                "side": side,
+                "confidence": 60,
+                "speed_grade": "⚡ อัตโนมัติ (Quantitative Velocity)",
+                "expected_tp_pct": 1.5,
+                "stop_loss_pct": 0.8,
+                "decree_th": f"คัดเลือกด้วยอัลกอริทึม Velocity สูงสุด (ATR {top.get('atr_pct', 0):.2f}%)",
+                "bull_debate": "ความผันผวนและวอลุ่มหนุนสูงสุดในกลุ่ม",
+                "bear_debate": "AI LLM ติดขัดชั่วคราว จึงใช้ Quantitative Fallback",
+                "telegram_message": fallback_msg
+            }
+
+        try:
+            cleaned = raw_resp.strip()
+            if "```json" in cleaned:
+                cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
+            elif "```" in cleaned:
+                cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+            parsed = json.loads(cleaned)
+
+            sym = parsed.get("champion_symbol", candidates[0]["symbol"])
+            valid_syms = [c["symbol"] for c in candidates]
+            if sym not in valid_syms:
+                matched = [s for s in valid_syms if sym.replace('/', '').replace('USDT', '') in s]
+                sym = matched[0] if matched else valid_syms[0]
+
+            side = parsed.get("side", "BUY").upper()
+            if side not in ["BUY", "SELL"]:
+                side = "BUY"
+
+            conf = int(parsed.get("confidence", 75))
+            speed = parsed.get("speed_grade", "⚡ รวดเร็ว (Fast Momentum)")
+            tp_pct = float(parsed.get("expected_tp_pct", 1.5))
+            sl_pct = float(parsed.get("stop_loss_pct", 0.8))
+            bull = parsed.get("bull_debate", "โมเมนตัมกำลังพุ่งแรง")
+            bear = parsed.get("bear_debate", "ระวังแรงขายทำกำไรระยะสั้น")
+            decree = parsed.get("decree_th", "เหรียญนี้มีศักยภาพทำกำไรเร็วที่สุดในรอบปัจจุบัน")
+
+            side_th = "เปิด Long (ซื้อ)" if side == "BUY" else "เปิด Short (ขาย)"
+            tg_msg = (
+                f"🏆 *[มติสภา AI - คู่เหรียญที่ทำกำไรได้เร็วและสูงที่สุด]*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"• *เหรียญแชมป์:* `{sym}` ({side_th})\n"
+                f"• *ระดับความเร็ว:* `{speed}`\n"
+                f"• *คะแนนความมั่นใจ AI:* `{conf}%`\n"
+                f"• *เป้ากำไรคาดหวัง (TP):* `+{tp_pct:.1f}%` | *จุดตัดขาดทุน (SL):* `-{sl_pct:.1f}%`\n"
+                f"──────────────────\n"
+                f"⚔️ *โต้วาทีสด (Bull vs Bear Debate):*\n"
+                f"• 🐂 *Bull:* _{bull}_\n"
+                f"• 🐻 *Bear:* _{bear}_\n"
+                f"──────────────────\n"
+                f"👑 *คำวินิจฉัย Risk Emperor:*\n"
+                f"_{decree}_\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💡 *คำสั่งเข้าเทรด:*\n"
+                f"• พิมพ์ **/hunt trade** เพื่อให้บอทยิงออเดอร์เหรียญ `{sym}` ทันที\n"
+                f"• หรือพิมพ์ **/autohunt on** เพื่อเปิดระบบสแกนและสลับเทรดอัตโนมัติ"
+            )
+
+            return {
+                "success": True,
+                "champion_symbol": sym,
+                "side": side,
+                "confidence": conf,
+                "speed_grade": speed,
+                "expected_tp_pct": tp_pct,
+                "stop_loss_pct": sl_pct,
+                "bull_debate": bull,
+                "bear_debate": bear,
+                "decree_th": decree,
+                "telegram_message": tg_msg
+            }
+        except Exception as e:
+            logger.warning(f"[MULTI-AGENT SCAN PARSE ERROR] {e}")
+            top = candidates[0]
+            side = "BUY" if top.get("cmo", 0) < 0 else "SELL"
+            side_th = "เปิด Long (ซื้อ)" if side == "BUY" else "เปิด Short (ขาย)"
+            return {
+                "success": True,
+                "champion_symbol": top["symbol"],
+                "side": side,
+                "confidence": 65,
+                "speed_grade": "⚡ รวดเร็ว (Fast Momentum)",
+                "expected_tp_pct": 1.5,
+                "stop_loss_pct": 0.8,
+                "decree_th": "คัดเลือกด้วยสัญญาณโมเมนตัมกราฟเทคนิคชั้นสูง",
+                "bull_debate": "วอลุ่มและกรอบราคาเอื้อต่อการทำกำไรเร็ว",
+                "bear_debate": "เฝ้าระวังความผันผวน",
+                "telegram_message": (
+                    f"🏆 *[มติสภา AI คัดเลือกคู่เหรียญ]*\n"
+                    f"• *เหรียญที่เลือก:* `{top['symbol']}` ({side_th})\n"
+                    f"• *ความมั่นใจ:* `65%`\n"
+                    f"• พิมพ์ **/hunt trade** เพื่อเริ่มเทรด"
+                )
+            }

@@ -53,7 +53,7 @@ from utils.indicators import calculate_cmo, calculate_vwap_bands, calculate_tii,
 from utils.order_manager import OrderManager
 from utils.profit_allocator import ProfitAllocator
 from risk_manager import RiskManager
-from config import SAFE_TRADING_CORE, RISK_CONTROL_REGIME, BOT_VERSION, PROFIT_ALLOCATION_CONFIG, BREAKEVEN_CONFIG, MICROSTRUCTURE_CONFIG
+from config import SAFE_TRADING_CORE, RISK_CONTROL_REGIME, BOT_VERSION, PROFIT_ALLOCATION_CONFIG, BREAKEVEN_CONFIG, MICROSTRUCTURE_CONFIG, get_regime_config
 from adaptive_brain import AdaptiveBrain
 from multi_agent_brain import MultiAgentBrain
 
@@ -195,6 +195,11 @@ class ScalpingBot:
         
         # Initialize Multi-Agent LLM Trading Council (TradingAgents Framework)
         self.multi_agent_brain = MultiAgentBrain()
+
+        # Multi-Asset Market Scanner & Auto-Hunt Configuration
+        self.auto_hunt = os.getenv("AUTO_HUNT", "false").strip().lower() in ["true", "1", "yes"]
+        raw_candidates = os.getenv("CANDIDATE_PAIRS", "XRP/USDT,SOL/USDT,DOGE/USDT,SUI/USDT,BTC/USDT,ETH/USDT,PEPE/USDT,ADA/USDT")
+        self.candidate_symbols = [s.strip() for s in raw_candidates.split(",") if s.strip()]
         
         # Set default CMO thresholds in state if they do not exist (stricter -65.0 for XRP Long)
         if self.state_manager.get("cmo_upper") is None:
@@ -410,7 +415,10 @@ class ScalpingBot:
         if not await self.security_check(chat_id):
             return
 
-        command = text.split()[0].lower()
+        parts = text.split()
+        command = parts[0].lower()
+        sub_arg = parts[1].lower() if len(parts) > 1 else ""
+
         if command in ["/help", "/?"]:
             help_message = (
                 "🤖 **AlphaScalp Control Center (V6.0)**\n"
@@ -418,9 +426,12 @@ class ScalpingBot:
                 "• **/status** : ตรวจเช็คสถานะระบบปฏิบัติการและสัญญาณ Heartbeat\n"
                 "• **/balance** : ดึงยอดเงินสดจริงบน Bybit UTA แบบ Real-time\n"
                 "• **/position** : ตรวจสอบตำแหน่งสัญญาที่เปิดค้างอยู่\n"
+                "• **/hunt** : 🎯 ให้สภา AI สแกนทุกเหรียญเพื่อเฟ้นหาคู่ที่กำไรเร็วและสูงที่สุด\n"
+                "• **/hunt trade** : ⚡ สั่งให้สภา AI สแกนเลือกเหรียญที่ดีที่สุดแล้วยิงออเดอร์ทันที\n"
+                "• **/autohunt on/off** : 🔄 เปิด/ปิดโหมดสแกนและสลับเทรดเหรียญเร็วอัตโนมัติ\n"
                 "• **/vault** : 🏦 ตรวจสอบยอดเงินกองทุนสะสมรักษาทุน (1/3 Vault Rule)\n"
                 "• **/stats** : สรุปจำนวนรอบและเปอร์เซ็นต์ Win Rate จากฐานข้อมูล\n"
-                "• **/ai** : 🧠 เรียกสภา Multi-Agent AI วิเคราะห์และโต้วาทีสดทันที\n"
+                "• **/ai** : 🧠 เรียกสภา Multi-Agent AI วิเคราะห์เหรียญปัจจุบัน\n"
                 "• **/pause** : ⏸️ สั่งหยุดพักการเปิดออเดอร์ใหม่ชั่วคราว\n"
                 "• **/resume** : ▶️ สั่งให้บอทกลับมาสแกนและเทรดต่อ\n"
                 "• **/closeall** : 🚨 สั่งปิดทุกไม้ฉุกเฉินทันทีด้วย Market Order"
@@ -444,6 +455,10 @@ class ScalpingBot:
             await self.cmd_closeall(chat_id)
         elif command in ["/ai", "/analyze", "/ai_analyze"]:
             await self.cmd_ai_analyze(chat_id)
+        elif command in ["/hunt", "/scan", "/best_pair", "/fastest"]:
+            await self.cmd_hunt(chat_id, sub_arg)
+        elif command in ["/autohunt", "/auto_hunt"]:
+            await self.cmd_autohunt(chat_id, sub_arg)
 
     async def cmd_ai_analyze(self, chat_id: int) -> None:
         await self.reply_to_telegram(chat_id, "⏳ *[สภา AI กำลังประชุม]* กำลังเรียกทีมวิเคราะห์ 4 สาย และจัดโต้วาทีสด Bull vs Bear กรุณารอสักครู่ครับ...")
@@ -455,6 +470,240 @@ class ScalpingBot:
             await self.reply_to_telegram(chat_id, res)
         else:
             await self.reply_to_telegram(chat_id, "⚠️ Multi-Agent Brain module not loaded.")
+
+    async def cmd_hunt(self, chat_id: int, sub_arg: str = "") -> None:
+        """Scans candidate cryptocurrency pairs, runs AI Council deliberation, and optionally trades."""
+        await self.reply_to_telegram(
+            chat_id,
+            "🔍 *[สภา AI กำลังสแกนทุกคู่เหรียญในตลาด Bybit]*\n"
+            "กำลังวิเคราะห์โมเมนตัม ความเร็ว (Velocity) และวอลุ่มระเบิดเพื่อหาคู่ที่ทำกำไรได้เร็วและสูงที่สุด กรุณารอสักครู่ครับ..."
+        )
+
+        candidates = await self.scan_market_candidates()
+        if not candidates:
+            await self.reply_to_telegram(chat_id, "⚠️ ไม่สามารถดึงข้อมูลตลาดของคู่เหรียญได้ในขณะนี้ กรุณาลองใหม่อีกครั้งครับ")
+            return
+
+        if not getattr(self, "multi_agent_brain", None):
+            await self.reply_to_telegram(chat_id, "⚠️ Multi-Agent Brain module not loaded.")
+            return
+
+        result = await self.multi_agent_brain.find_highest_profit_opportunity(candidates)
+        msg = result.get("telegram_message", "")
+        if msg:
+            await self.reply_to_telegram(chat_id, msg)
+
+        # If user explicitly instructed /hunt trade
+        if sub_arg == "trade" and result.get("success"):
+            champion_sym = result.get("champion_symbol", "")
+            rec_side = result.get("side", "BUY")
+            conf = result.get("confidence", 0)
+
+            # Check if bot currently has open position
+            if self.current_position_size != 0:
+                await self.reply_to_telegram(
+                    chat_id,
+                    f"⚠️ *[ไม่สามารถเข้าเทรดได้]*\n"
+                    f"ปัจจุบันยังมีสัญญาเปิดค้างอยู่ ({self.symbol} ขนาด {self.current_position_size})\n"
+                    f"เพื่อความปลอดภัย กรุณารอระบบปิดไม้เดิม หรือสั่ง `/closeall` ก่อนครับ"
+                )
+                return
+
+            if conf < 60:
+                await self.reply_to_telegram(
+                    chat_id,
+                    f"🛑 *[ระงับการเข้าเทรดอัตโนมัติ]*\n"
+                    f"คะแนนความมั่นใจของสภา AI อยู่ที่ {conf}% (ต่ำกว่าเกณฑ์ความปลอดภัย 60%)"
+                )
+                return
+
+            # Switch current symbol to champion and execute entry!
+            await self.reply_to_telegram(
+                chat_id,
+                f"⚡ *[กำลังสั่งเปิดออเดอร์เหรียญแชมป์]*\n"
+                f"• คู่เหรียญ: `{champion_sym}` ({rec_side})\n"
+                f"• โหมด: {'Dry Run (จำลอง)' if self.dry_run else 'Live Real Bybit Order'}\n"
+                f"กำลังส่งคำสั่งเข้า Bybit V5 Linear..."
+            )
+            old_sym = self.symbol
+            self.symbol = champion_sym
+            try:
+                await self.execute_dynamic_entry(champion_sym, rec_side, result)
+            except Exception as e:
+                logger.error(f"Failed to execute dynamic entry for {champion_sym}: {e}")
+                await self.reply_to_telegram(chat_id, f"❌ เกิดข้อผิดพลาดในการยิงออเดอร์: {e}")
+                self.symbol = old_sym
+
+    async def cmd_autohunt(self, chat_id: int, sub_arg: str = "") -> None:
+        """Toggle or check auto-hunt status."""
+        if sub_arg in ["on", "enable", "start"]:
+            self.auto_hunt = True
+            self.state_manager.set("auto_hunt", True)
+            await self.reply_to_telegram(
+                chat_id,
+                "🟢 *[เปิดโหมด Auto-Hunt สำเร็จ]*\n"
+                "ระบบจะให้สภา AI สแกนทุกคู่เหรียญในตลาดอัตโนมัติในทุกๆ รอบ และจะเลือกเปิดเทรดเฉพาะคู่เหรียญที่มีโอกาสทำกำไรสูงและเร็วที่สุดครับ!"
+            )
+        elif sub_arg in ["off", "disable", "stop"]:
+            self.auto_hunt = False
+            self.state_manager.set("auto_hunt", False)
+            await self.reply_to_telegram(
+                chat_id,
+                f"🔴 *[ปิดโหมด Auto-Hunt เรียบร้อย]*\n"
+                f"ระบบจะกลับมาเฝ้าและเทรดเฉพาะคู่หลัก `{self.symbol}` ตามเดิมครับ"
+            )
+        else:
+            status_th = "🟢 เปิดใช้งาน (Active)" if self.auto_hunt else "🔴 ปิดอยู่ (Disabled)"
+            await self.reply_to_telegram(
+                chat_id,
+                f"🎯 *[สถานะระบบ Auto-Hunt]*: {status_th}\n\n"
+                f"• พิมพ์ **/autohunt on** เพื่อเปิดให้สภา AI เลือกเหรียญเทรดอัตโนมัติ\n"
+                f"• พิมพ์ **/autohunt off** เพื่อปิดและเทรดเฉพาะ `{self.symbol}`\n"
+                f"• พิมพ์ **/hunt** เพื่อสแกนดูผลคัดเลือกเหรียญด้วยตนเอง"
+            )
+
+    async def scan_market_candidates(self, symbols: List[str] = None) -> List[Dict[str, Any]]:
+        """
+        Scans candidate crypto futures pairs on Bybit,
+        calculates CMO, ATR %, 24h change %, and Volume Spikes for each.
+        """
+        sym_list = symbols if symbols else getattr(self, "candidate_symbols", [
+            "XRP/USDT", "SOL/USDT", "DOGE/USDT", "SUI/USDT", "BTC/USDT", "ETH/USDT", "PEPE/USDT", "ADA/USDT"
+        ])
+        results = []
+
+        async def fetch_one(sym: str):
+            try:
+                ticker = await self.fetch_ticker_safe(symbol=sym)
+                last_price = safe_float(ticker.get("last", 0.0))
+                change_24h = safe_float(ticker.get("percentage", 0.0))
+                quote_vol = safe_float(ticker.get("quoteVolume", 0.0))
+
+                df = await self.fetch_ohlcv_safe(limit=40, symbol=sym)
+                if df.empty or len(df) < 20:
+                    return None
+
+                cmo_series = calculate_cmo(df)
+                latest_cmo = float(cmo_series.iloc[-1]) if not cmo_series.empty else 0.0
+                regimes = classify_market_regime(df)
+                latest_regime = regimes.iloc[-1] if not regimes.empty else "RANGE"
+
+                high = df["high"]
+                low = df["low"]
+                close_prev = df["close"].shift(1)
+                tr = pd.concat([high - low, (high - close_prev).abs(), (low - close_prev).abs()], axis=1).max(axis=1)
+                atr_14 = tr.rolling(window=14).mean().iloc[-1]
+                atr_pct = (atr_14 / (last_price + 1e-9)) * 100.0
+
+                vol_sma = df["volume"].rolling(window=14).mean().iloc[-1]
+                last_vol = df["volume"].iloc[-1]
+                vol_spike = float(last_vol / (vol_sma + 1e-9))
+
+                return {
+                    "symbol": sym,
+                    "price": last_price,
+                    "change_24h": change_24h,
+                    "quote_vol": quote_vol,
+                    "cmo": latest_cmo,
+                    "atr_pct": float(atr_pct),
+                    "vol_spike": float(vol_spike),
+                    "regime": str(latest_regime)
+                }
+            except Exception as e:
+                logger.warning(f"Failed scanning candidate {sym}: {e}")
+                return None
+
+        tasks = [fetch_one(s) for s in sym_list]
+        collected = await asyncio.gather(*tasks, return_exceptions=True)
+        for c in collected:
+            if isinstance(c, dict) and c.get("price", 0) > 0:
+                results.append(c)
+
+        results.sort(key=lambda x: (x.get("atr_pct", 0) * x.get("vol_spike", 1.0)), reverse=True)
+        return results
+
+    async def execute_dynamic_entry(self, symbol: str, side: str, ai_result: Dict[str, Any]) -> None:
+        """Executes a live or dry-run entry on Bybit for the AI Council's chosen champion coin."""
+        regime_cfg = get_regime_config(symbol)
+        ticker = await self.fetch_ticker_safe(symbol=symbol)
+        close_price = safe_float(ticker.get("last", 0.0))
+        if close_price <= 0:
+            logger.error(f"Cannot execute dynamic entry: invalid price for {symbol}")
+            return
+
+        tp_pct = float(ai_result.get("expected_tp_pct", regime_cfg.get("take_profit_pct", 0.015) * 100)) / 100.0
+        sl_pct = float(ai_result.get("stop_loss_pct", regime_cfg.get("stop_loss_pct", 0.009) * 100)) / 100.0
+
+        if side.upper() == "BUY":
+            stop_loss = round(close_price * (1.0 - sl_pct), 4)
+            target1 = round(close_price * (1.0 + tp_pct), 4)
+        else:
+            stop_loss = round(close_price * (1.0 + sl_pct), 4)
+            target1 = round(close_price * (1.0 - tp_pct), 4)
+
+        lev_allowed, safe_leverage, lev_reason = self.risk_manager.validate_leverage(self.leverage)
+        final_leverage = safe_leverage if lev_allowed else 5
+
+        await self.order_manager.setup_isolated_margin(symbol, final_leverage)
+
+        capital = await self.get_available_balance()
+        position_size = await self.order_manager.calculate_position_size(capital, close_price, stop_loss, final_leverage, symbol)
+        if position_size <= 0:
+            position_size = regime_cfg.get("min_position_size", 1.0)
+
+        entry_side = side.upper()
+        symbol_futures = symbol.replace('/', '').split(':')[0]
+        logger.info(f"🚀 [DYNAMIC AI ENTRY] {entry_side} {symbol_futures} size={position_size} @ {close_price}")
+
+        entry_order_id = "DRY_RUN"
+        if not self.dry_run:
+            try:
+                order_params = {'category': 'linear'}
+                response = await self.exchange.create_order(
+                    symbol=symbol_futures,
+                    type='market',
+                    side=entry_side.lower(),
+                    amount=position_size,
+                    params=order_params
+                )
+                entry_order_id = response.get('id', '')
+                logger.info(f"✅ Live market entry placed on Bybit. Order ID: {entry_order_id}")
+            except Exception as e:
+                logger.error(f"❌ Failed to place dynamic entry on Bybit: {e}")
+                await self.send_telegram(f"❌ เกิดข้อผิดพลาดในการส่งคำสั่งเข้า Bybit: {e}")
+                return
+
+        self.current_position_size = position_size if entry_side == 'BUY' else -position_size
+        self.entry_price = close_price
+        self.bars_held = 0
+
+        pos_payload = {
+            "size": position_size,
+            "side": entry_side,
+            "entry_price": close_price,
+            "stop_loss": stop_loss,
+            "target1": target1,
+            "trailing_stop": stop_loss,
+            "layers_count": 1,
+            "last_entry_price": close_price,
+            "order_id": entry_order_id,
+            "entry_time": time.time()
+        }
+        self.state_manager.set(f"positions.{symbol}", pos_payload)
+
+        side_th = "เปิด Long (ซื้อ)" if entry_side == 'BUY' else "เปิด Short (ขาย)"
+        alert_msg = (
+            f"⚡ *[สภา AI เปิดคำสั่งเทรดเหรียญแชมป์]*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• *คู่เหรียญ:* `{symbol}` ({side_th})\n"
+            f"• *ขนาดสัญญา:* `{position_size}`\n"
+            f"• *ราคาเข้า:* `${close_price:.4f}`\n"
+            f"• *เป้ากำไร (TP):* `${target1:.4f}` (+{tp_pct*100:.1f}%)\n"
+            f"• *จุดตัดขาดทุน (SL):* `${stop_loss:.4f}` (-{sl_pct*100:.1f}%)\n"
+            f"• *สถานะ:* {'🟢 ส่งออเดอร์ Bybit สำเร็จ' if not self.dry_run else '🟡 จำลองการเทรด (Dry Run)'}\n"
+            f"• *คำตัดสิน Risk Emperor:* _{ai_result.get('decree_th', 'มติสภา AI เห็นชอบ')}_"
+        )
+        await self.send_telegram(alert_msg)
 
     async def cmd_vault(self, chat_id: int) -> None:
         summary = self.profit_allocator.get_summary()
@@ -725,7 +974,7 @@ class ScalpingBot:
                 await asyncio.sleep(attempt * 2)
 
     async def place_native_maker_tp_with_retry(self, symbol, side, amount, entry_price):
-        regime_cfg = RISK_CONTROL_REGIME.get('XRP_USDT', {})
+        regime_cfg = get_regime_config(symbol)
         tp_pct = regime_cfg.get('take_profit_pct', 0.012)
         tp_side = 'sell' if side.upper() == 'BUY' else 'buy'
         tp_price = round(entry_price * (1.0 + tp_pct), 4) if side.upper() == 'BUY' else round(entry_price * (1.0 - tp_pct), 4)
@@ -902,10 +1151,10 @@ class ScalpingBot:
             logger.error(f"❌ Walk-Forward Optimization failed: {e}")
 
     @ccxt_retry()
-    async def fetch_ohlcv_safe(self, limit: int = 100) -> pd.DataFrame:
+    async def fetch_ohlcv_safe(self, limit: int = 100, symbol: str = None) -> pd.DataFrame:
         """Fetch OHLCV candle data safely using aggressive 5-attempt retry/backoff wrappers."""
-        # Strict Bybit V5 Linear Derivative Kline Override
-        formatted_symbol = self.symbol.replace('/', '') # Converts XRP/USDT to XRPUSDT
+        target_symbol = symbol if symbol else self.symbol
+        formatted_symbol = target_symbol.replace('/', '').split(':')[0]
         params = {
             'category': 'linear' # Forces linear futures market stream
         }
@@ -937,17 +1186,37 @@ class ScalpingBot:
         return df
 
     @ccxt_retry()
-    async def fetch_ticker_safe(self) -> Dict[str, Any]:
+    async def fetch_ticker_safe(self, symbol: str = None) -> Dict[str, Any]:
         """Fetch real-time ticker data safely using retry/backoff wrappers."""
-        return await self.exchange.fetch_ticker(self.symbol, params={'category': 'linear'})
+        target_symbol = symbol if symbol else self.symbol
+        return await self.exchange.fetch_ticker(target_symbol, params={'category': 'linear'})
 
     async def run_strategy_tick(self) -> None:
         """The main analysis evaluation logic executed at candle closes."""
+        # Auto-Hunt Engine: If enabled and currently no position, let AI Council scan & trade the fastest coin
+        if getattr(self, "auto_hunt", False) and self.current_position_size == 0:
+            try:
+                candidates = await self.scan_market_candidates()
+                if candidates and getattr(self, "multi_agent_brain", None):
+                    ai_hunt = await self.multi_agent_brain.find_highest_profit_opportunity(candidates)
+                    if ai_hunt.get("success") and ai_hunt.get("confidence", 0) >= 65:
+                        champ = ai_hunt.get("champion_symbol", "")
+                        side = ai_hunt.get("side", "BUY")
+                        logger.info(f"🎯 [AUTO-HUNT TRIGGERED] Council selected {champ} ({side}) with confidence {ai_hunt.get('confidence')}%")
+                        self.symbol = champ
+                        await self.execute_dynamic_entry(champ, side, ai_hunt)
+                        return
+            except Exception as hunt_err:
+                logger.warning(f"⚠️ [AUTO-HUNT CYCLE ERROR] {hunt_err}")
+
         self.db_manager.log_message("INFO", f"Evaluating strategy tick for {self.symbol}...", "TradingEngine")
+        
+        # Dynamic Risk Regime Parameters
+        regime_cfg = get_regime_config(self.symbol)
+        base_unit = regime_cfg.get("min_position_size", 1.0)
         
         # Hard Cap Pyramiding Protection
         MAX_LAYERS = 3
-        base_unit = 3.0 if 'XRP' in self.symbol else 0.1
         max_allowable_size = base_unit * MAX_LAYERS
 
         if abs(self.current_position_size) >= max_allowable_size:
@@ -1197,8 +1466,8 @@ class ScalpingBot:
                     # Live Order execution via CCXT
                     try:
                         # Force strict integration with Bybit Unified Derivative infrastructure
-                        regime_cfg = RISK_CONTROL_REGIME['XRP_USDT']
-                        symbol_futures = "XRPUSDT" # Standardize Bybit V5 string structure
+                        regime_cfg = get_regime_config(self.symbol)
+                        symbol_futures = self.symbol.replace('/', '').split(':')[0] # Standardize Bybit V5 string structure
 
                         order_params = {
                             'category': 'linear',
