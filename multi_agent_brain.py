@@ -2,7 +2,9 @@ import os
 import json
 import logging
 import asyncio
-from typing import Dict, Any, Optional
+import urllib.request
+import urllib.error
+from typing import Dict, Any, Tuple
 from datetime import datetime
 
 logger = logging.getLogger("TradingEngine")
@@ -18,93 +20,120 @@ class MultiAgentBrain:
       5. Bullish Paladin vs Bearish Berserker (Structured Debate Arena)
       6. Risk Emperor (Final Rating: BUY / SELL / HOLD with Confidence Score)
       
-    Graceful Degradation:
-      - If no AI keys are provided in environment, operates in safe pass-through mode
-        so the bot remains functional while waiting for keys on Render.
-      - Supports Google Gemini (GOOGLE_API_KEY), OpenAI (OPENAI_API_KEY), and DeepSeek (DEEPSEEK_API_KEY).
+    Zero-Dependency Resilient Engine:
+      - Uses direct REST API with auto-model fallback (gemini-2.5-flash -> 2.0 -> 1.5).
+      - Operates in safe pass-through standby if keys are not present.
+      - Displays precise error diagnostics to Telegram if a key is invalid or quota exceeded.
     """
 
     def __init__(self):
-        self.google_key = os.getenv("GOOGLE_API_KEY", "").strip()
-        self.openai_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.deepseek_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-        self.has_ai_key = bool(self.google_key or self.openai_key or self.deepseek_key)
+        self.google_key = ""
+        self.openai_key = ""
+        self.deepseek_key = ""
+        self.has_ai_key = False
         self.client_type = None
-
-        if self.google_key:
-            self.client_type = "google"
-            logger.info("🧠 [MULTI-AGENT AI] Google Gemini Engine Activated!")
-        elif self.openai_key:
-            self.client_type = "openai"
-            logger.info("🧠 [MULTI-AGENT AI] OpenAI Engine Activated!")
-        elif self.deepseek_key:
-            self.client_type = "deepseek"
-            logger.info("🧠 [MULTI-AGENT AI] DeepSeek Engine Activated!")
-        else:
-            logger.info("ℹ️ [MULTI-AGENT AI] No AI keys detected in environment. Running in Standby Pass-Through mode until keys are added on Render.")
+        self.reload_keys()
 
     def reload_keys(self):
-        """Re-read environment variables in case keys were added dynamically."""
-        self.google_key = os.getenv("GOOGLE_API_KEY", "").strip()
-        self.openai_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.deepseek_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+        """Re-read environment variables in case keys were added or updated on Render."""
+        self.google_key = os.getenv("GOOGLE_API_KEY", "").strip().strip('"').strip("'")
+        self.openai_key = os.getenv("OPENAI_API_KEY", "").strip().strip('"').strip("'")
+        self.deepseek_key = os.getenv("DEEPSEEK_API_KEY", "").strip().strip('"').strip("'")
         self.has_ai_key = bool(self.google_key or self.openai_key or self.deepseek_key)
+
         if self.google_key:
             self.client_type = "google"
+            logger.info("🧠 [MULTI-AGENT AI] Google Gemini Engine Selected.")
         elif self.openai_key:
             self.client_type = "openai"
+            logger.info("🧠 [MULTI-AGENT AI] OpenAI Engine Selected.")
         elif self.deepseek_key:
             self.client_type = "deepseek"
+            logger.info("🧠 [MULTI-AGENT AI] DeepSeek Engine Selected.")
+        else:
+            self.client_type = None
 
-    async def _call_llm(self, prompt: str, system_prompt: str = "") -> str:
-        """Call configured LLM provider asynchronously."""
+    def _call_gemini_rest(self, prompt: str, system_prompt: str = "") -> Tuple[str, str]:
+        """Direct REST call to Google Gemini with model fallback and error parsing."""
+        key = self.google_key
+        models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+        full_text = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+        payload = {"contents": [{"parts": [{"text": full_text}]}]}
+        data = json.dumps(payload).encode("utf-8")
+        last_err = ""
+
+        for model in models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    res_json = json.loads(resp.read().decode("utf-8"))
+                    candidates = res_json.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts:
+                            return parts[0].get("text", "").strip(), ""
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode("utf-8", errors="ignore")
+                msg = str(e)
+                try:
+                    err_json = json.loads(err_body)
+                    msg = err_json.get("error", {}).get("message", msg)
+                except Exception:
+                    pass
+                last_err = f"HTTP {e.code}: {msg}"
+                if e.code == 400 and ("API_KEY_INVALID" in err_body or "not valid" in err_body.lower()):
+                    return "", f"API Key ไม่ถูกต้อง ({msg})"
+            except Exception as e:
+                last_err = str(e)
+
+        return "", last_err
+
+    def _call_openai_compat_rest(self, prompt: str, system_prompt: str = "") -> Tuple[str, str]:
+        """Direct REST call to OpenAI or DeepSeek."""
+        is_deepseek = (self.client_type == "deepseek")
+        url = "https://api.deepseek.com/v1/chat/completions" if is_deepseek else "https://api.openai.com/v1/chat/completions"
+        key = self.deepseek_key if is_deepseek else self.openai_key
+        model = "deepseek-chat" if is_deepseek else "gpt-4o-mini"
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {"model": model, "messages": messages, "temperature": 0.2}
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                res_json = json.loads(resp.read().decode("utf-8"))
+                choices = res_json.get("choices", [])
+                if choices:
+                    return choices[0].get("message", {}).get("content", "").strip(), ""
+            return "", "Empty response from provider"
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="ignore")
+            return "", f"HTTP {e.code}: {err_body}"
+        except Exception as e:
+            return "", str(e)
+
+    async def _call_llm(self, prompt: str, system_prompt: str = "") -> Tuple[str, str]:
+        """Asynchronously invoke the configured LLM."""
         self.reload_keys()
         if not self.has_ai_key:
-            return ""
+            return "", "No AI key configured"
 
-        # Run synchronous SDK calls in thread executor to keep bot's event loop unblocked
         loop = asyncio.get_running_loop()
-
         if self.client_type == "google":
-            def _call_gemini():
-                try:
-                    from google import genai
-                    client = genai.Client(api_key=self.google_key)
-                    full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-                    response = client.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=full_prompt
-                    )
-                    return response.text or ""
-                except Exception as e:
-                    logger.error(f"[GEMINI CALL ERROR] {e}")
-                    return ""
-            return await loop.run_in_executor(None, _call_gemini)
-
+            return await loop.run_in_executor(None, self._call_gemini_rest, prompt, system_prompt)
         elif self.client_type in ["openai", "deepseek"]:
-            def _call_openai_compat():
-                try:
-                    from openai import OpenAI
-                    base_url = "https://api.deepseek.com/v1" if self.client_type == "deepseek" else None
-                    key = self.deepseek_key if self.client_type == "deepseek" else self.openai_key
-                    model = "deepseek-chat" if self.client_type == "deepseek" else "gpt-4o-mini"
-                    client = OpenAI(api_key=key, base_url=base_url)
-                    messages = []
-                    if system_prompt:
-                        messages.append({"role": "system", "content": system_prompt})
-                    messages.append({"role": "user", "content": prompt})
-                    response = client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        temperature=0.2
-                    )
-                    return response.choices[0].message.content or ""
-                except Exception as e:
-                    logger.error(f"[OPENAI/DEEPSEEK CALL ERROR] {e}")
-                    return ""
-            return await loop.run_in_executor(None, _call_openai_compat)
+            return await loop.run_in_executor(None, self._call_openai_compat_rest, prompt, system_prompt)
 
-        return ""
+        return "", "Unknown provider"
 
     async def evaluate_trade(
         self,
@@ -120,7 +149,6 @@ class MultiAgentBrain:
         """
         self.reload_keys()
         if not self.has_ai_key:
-            # Pass-through mode when keys are not yet provided
             return {
                 "approved": True,
                 "confidence": 0.5,
@@ -167,9 +195,18 @@ Output EXACT JSON format only:
 """
 
         system_prompt = "You are a professional multi-agent crypto trading committee. Be extremely strict on risk management. Return only valid JSON."
-        raw_resp = await self._call_llm(prompt, system_prompt)
+        raw_resp, err = await self._call_llm(prompt, system_prompt)
 
-        # Parse JSON
+        if not raw_resp:
+            logger.warning(f"[MULTI-AGENT LLM ERROR] {err}")
+            return {
+                "approved": True,
+                "confidence": 0.65,
+                "reason": f"AI Council bypass (Error: {err})",
+                "summary": "Technical entry validated.",
+                "telegram_message": ""
+            }
+
         try:
             cleaned = raw_resp.strip()
             if "```json" in cleaned:
@@ -215,9 +252,9 @@ Output EXACT JSON format only:
             }
 
         except Exception as e:
-            logger.warning(f"[MULTI-AGENT PARSE FALLBACK] Error parsing AI response: {e}. Raw: {raw_resp[:100]}...")
+            logger.warning(f"[MULTI-AGENT PARSE FALLBACK] Error parsing JSON: {e}")
             return {
-                "approved": True, # Fail-safe allow technical rule if parsing hiccup
+                "approved": True,
                 "confidence": 0.65,
                 "reason": "AI Council approved with default risk parameters.",
                 "summary": "Technical entry validated.",
@@ -230,10 +267,11 @@ Output EXACT JSON format only:
         if not self.has_ai_key:
             return (
                 "⚠️ *[Multi-Agent AI อยู่ในสถานะ Standby]*\n"
-                "ยังไม่ได้ใส่ API Key ของ AI บนระบบ Render ครับ\n\n"
+                "ยังไม่พบคีย์ AI บนระบบ Render ครับ\n\n"
                 "💡 *วิธีเปิดใช้งาน:*\n"
-                "ไปที่หน้า Render ➔ เลือก Service ➔ เมนู Environment\n"
-                "แล้วเพิ่ม `GOOGLE_API_KEY` (Gemini ฟรี) หรือ `OPENAI_API_KEY` ได้เลยครับ"
+                "ไปที่ Render ➔ เมนู Environment ➔ กดปุ่ม `+ Add Environment Variable`\n"
+                "• Key: `GOOGLE_API_KEY`\n"
+                "• Value: วางคีย์ Gemini ของคุณ แล้วกด Save Changes ครับ"
             )
 
         prompt = f"""
@@ -248,9 +286,13 @@ Simulate a rapid discussion by:
 
 Provide a concise Thai summary for Telegram with bold emojis. Max 200 words.
 """
-        raw_resp = await self._call_llm(prompt, "You are TradingAgents AI committee. Format output beautifully in Thai for Telegram markdown.")
+        raw_resp, err = await self._call_llm(prompt, "You are TradingAgents AI committee. Format output beautifully in Thai for Telegram markdown.")
         if not raw_resp:
-            return "❌ ไม่สามารถติดต่อสมอง AI ได้ในขณะนี้ กรุณาตรวจสอบ API Key บน Render"
+            return (
+                f"❌ *[ไม่สามารถติดต่อสมอง AI ได้]*\n"
+                f"• *สาเหตุ:* `{err}`\n\n"
+                f"💡 กรุณาตรวจสอบว่าคีย์ `GOOGLE_API_KEY` บน Render ถูกต้องและไม่มีเว้นวรรคส่วนเกินครับ"
+            )
 
         header = f"🧙‍♂️ *[รายงานสดจากสภา AI TradingAgents]*\n━━━━━━━━━━━━━━━━━━\n"
         return header + raw_resp.strip()
