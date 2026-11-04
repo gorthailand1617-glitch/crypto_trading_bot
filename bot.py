@@ -1019,6 +1019,19 @@ class ScalpingBot:
             
             # Available margin (USDT free balance or totalAvailableBalance)
             available_margin = balance_data.get('USDT', {}).get('free', 0.0)
+
+            # Check Funding Account balance in case user recently deposited funds
+            funding_notice = ""
+            try:
+                funding_data = await asyncio.wait_for(self.exchange.fetch_balance({'type': 'funding'}), timeout=3.5)
+                funding_usdt = float(funding_data.get('USDT', {}).get('free', 0.0) or 0.0)
+                if funding_usdt > 0.01:
+                    funding_notice = (
+                        f"\n\n💡 *ตรวจพบเงินในกระเป๋า Funding:* `${funding_usdt:,.2f} USDT`\n"
+                        f"*(กรุณากดปุ่ม Transfer ในแอป Bybit จาก Funding ➔ Unified เพื่อให้บอทนำเงินก้อนนี้ไปเทรดได้ครับ)*"
+                    )
+            except Exception:
+                pass
             
             balance_msg = (
                 f"💰 *ยอดเงินในบัญชี Bybit Unified (UTA)*\n"
@@ -1026,6 +1039,7 @@ class ScalpingBot:
                 f"• *ยอดรวมในกระเป๋า (Wallet Balance):* `${total_wallet_balance:,.2f} USDT`\n"
                 f"• *มูลค่าสุทธิของพอร์ต (Total Equity):* `${total_equity:,.2f} USDT`\n"
                 f"• *มาร์จิ้นที่ใช้ได้ (Available Margin):* `${available_margin:,.2f} USDT`"
+                f"{funding_notice}"
             )
             await self.reply_to_telegram(chat_id, balance_msg)
         except Exception as e:
