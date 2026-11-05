@@ -115,6 +115,26 @@ class StateManager:
                 return True
         return False
 
+    def is_short_cooldown_active(self, cooldown_seconds: float = 900.0) -> bool:
+        """
+        Checks whether a Stop-Loss Lockout / Loss Cooldown period is currently active for Short signals.
+        Returns True if the last closed order was in the Short direction ("SELL") and closed with a loss (pnl < 0),
+        and the specified cooldown duration (5 bars / 15 mins by default) has not yet elapsed.
+        """
+        last_order = self.get("last_closed_order", {})
+        if not last_order:
+            return False
+        
+        last_side = last_order.get("side")
+        last_pnl = last_order.get("pnl", 0.0)
+        last_ts = last_order.get("timestamp", 0.0)
+        
+        if last_side == "SELL" and last_pnl < 0:
+            elapsed = time.time() - last_ts
+            if elapsed < cooldown_seconds:
+                return True
+        return False
+
     def _async_save(self) -> None:
         """Offloads I/O to background executor."""
         with self.lock:

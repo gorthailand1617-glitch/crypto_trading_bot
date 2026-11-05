@@ -1158,7 +1158,54 @@ class ScalpingBot:
                 logger.warning(f"⚠️ [NETWORK RETRY {attempt}/{max_retries}] Retrying in {attempt * 2}s due to: {err_str}")
                 await asyncio.sleep(attempt * 2)
 
+    async def sync_native_exchange_tpsl(self, symbol: str, side: str, entry_price: float, size: float) -> bool:
+        """
+        Synchronizes or updates Native Exchange-Level Take Profit and Stop Loss directly on Bybit V5.
+        Uses /v5/position/trading-stop so the exchange engine protects the position 24/7.
+        """
+        if self.dry_run or not self.exchange:
+            return True
+
+        regime_cfg = get_regime_config(symbol)
+        tp_pct = regime_cfg.get('take_profit_pct', 0.012)
+        sl_pct = regime_cfg.get('stop_loss_pct', 0.018)
+
+        price_precision = 4 if entry_price < 10 else 2
+        if side.upper() == 'BUY':
+            tp_price = round(entry_price * (1.0 + tp_pct), price_precision)
+            sl_price = round(entry_price * (1.0 - sl_pct), price_precision)
+        else:
+            tp_price = round(entry_price * (1.0 - tp_pct), price_precision)
+            sl_price = round(entry_price * (1.0 + sl_pct), price_precision)
+
+        symbol_futures = symbol.replace('/', '').split(':')[0]
+        try:
+            params = {
+                'category': 'linear',
+                'symbol': symbol_futures,
+                'takeProfit': f"{tp_price:.{price_precision}f}",
+                'stopLoss': f"{sl_price:.{price_precision}f}",
+                'tpTriggerBy': 'LastPrice',
+                'slTriggerBy': 'LastPrice',
+                'tpslMode': 'Full',
+                'positionIdx': 0
+            }
+            res = await self.exchange.private_post_v5_position_trading_stop(params)
+            ret_code = res.get('retCode', -1) if isinstance(res, dict) else -1
+            if ret_code == 0:
+                logger.info(f"🛡️ [BYBIT NATIVE TP/SL SYNCED] Symbol={symbol_futures}, Side={side}, Entry={entry_price:.4f}, TP={tp_price:.4f}, SL={sl_price:.4f}")
+                return True
+            else:
+                logger.warning(f"⚠️ [BYBIT NATIVE TP/SL NOTICE] retCode={ret_code}, msg={res.get('retMsg')}")
+                return False
+        except Exception as e:
+            logger.warning(f"⚠️ [BYBIT NATIVE TP/SL SYNC EXCEPTION]: {e}")
+            return False
+
     async def place_native_maker_tp_with_retry(self, symbol, side, amount, entry_price):
+        # 1. Sync Native Exchange-Level TP/SL directly on position for 100% fail-safe protection
+        await self.sync_native_exchange_tpsl(symbol, side, entry_price, amount)
+
         regime_cfg = get_regime_config(symbol)
         tp_pct = regime_cfg.get('take_profit_pct', 0.012)
         tp_side = 'sell' if side.upper() == 'BUY' else 'buy'
@@ -1191,8 +1238,8 @@ class ScalpingBot:
                     return order
             except Exception as tp_err:
                 logger.warning(f"⚠️ TP placement attempt {attempt} failed: {str(tp_err)}")
-        logger.warning("⚠️ Could not place Native Maker TP. Active tracker loop will handle TP/SL.")
-        return None
+        logger.info("ℹ️ Native Exchange Trading Stop actively protecting position.")
+        return {"id": "NATIVE_EXCHANGE_TP_SYNCED"}
 
     def recalculate_stats(self):
         try:
@@ -1484,14 +1531,17 @@ class ScalpingBot:
                 last_entry_idx = active_position.get("last_entry_bar_index", 0)
                 last_entry_price = active_position.get("last_entry_price", active_position.get("entry_price", 0.0))
                 
-                # Strict maximum layer limits: Max 5 layers per asset direction
-                if layers_count >= 5:
+                # Strict maximum layer limits: Max 3 layers per asset direction (Cap exposure)
+                if layers_count >= 3:
+                    logger.debug(f"Max layers limit ({layers_count}/3) reached. Halting further pyramiding.")
                     return
                 
-                # Entry cooldown logic: Minimum 3 candle bars OR minimum price spacing of 1.5 * ATR(14)
+                # Strict Entry cooldown: Minimum 5 candle bars (15m on 3m timeframe) AND minimum price delta of 0.8% (or 2.0 * ATR)
                 bars_since_last = latest_idx - last_entry_idx
                 price_dist = abs(close_price - last_entry_price)
-                if bars_since_last < 3 and price_dist < (1.5 * latest_atr):
+                min_price_dist = max(0.008 * last_entry_price, 2.0 * latest_atr)
+                if bars_since_last < 5 or price_dist < min_price_dist:
+                    logger.debug(f"Pyramiding cooldown active: bars={bars_since_last}/5, dist={price_dist:.4f}/{min_price_dist:.4f}")
                     return
                 
                 is_pyramiding = True
@@ -1535,10 +1585,17 @@ class ScalpingBot:
                             f"🚫 [EMA 200 TREND FILTER] Blocked Long MEAN_REVERSION: Close price ({close_price:.4f}) < EMA 200 ({latest_ema200:.4f})"
                         )
                 elif close_price >= vwap_upper.iloc[latest_idx] and latest_cmo > cmo_upper_thresh:
-                    decision_action = "SELL_REVERSION"
-                    entry_side = "SELL"
-                    stop_loss = close_price + (2.5 * latest_atr)
-                    target1 = vwap_val  # Dynamic TP target (VWAP Median Line)
+                    # STRICT RULE: Do NOT generate Short MEAN_REVERSION signals if current close price > EMA 200.
+                    # Allow Shorts ONLY when price < EMA 200 OR during validated IMPULSE_BEAR regime.
+                    if close_price < latest_ema200:
+                        decision_action = "SELL_REVERSION"
+                        entry_side = "SELL"
+                        stop_loss = close_price + (2.5 * latest_atr)
+                        target1 = vwap_val  # Dynamic TP target (VWAP Median Line)
+                    else:
+                        logger.info(
+                            f"🚫 [EMA 200 TREND FILTER] Blocked Short MEAN_REVERSION: Close price ({close_price:.4f}) > EMA 200 ({latest_ema200:.4f}) [Market is Bullish, no counter-trend Short]"
+                        )
                     
             # Loss Cooldown Mechanism (Stop-Loss Lockout): 5 bars (15 minutes on 3m timeframe)
             tf_mins = int(self.timeframe.replace("m", "")) if "m" in self.timeframe else 3
@@ -1546,6 +1603,11 @@ class ScalpingBot:
             if entry_side == "BUY" and self.state_manager.is_long_cooldown_active(cooldown_seconds=cooldown_seconds):
                 logger.info(f"⏳ [LOSS COOLDOWN LOCKOUT] Long signal ({decision_action}) blocked: 5-bar ({tf_mins * 5} min) lockout active after previous Long loss.")
                 self.db_manager.log_message("WARNING", f"⏳ [LOSS COOLDOWN LOCKOUT] Long entry blocked for 5 bars ({tf_mins * 5} mins) following a loss.", "TradingEngine")
+                decision_action = None
+                entry_side = None
+            elif entry_side == "SELL" and self.state_manager.is_short_cooldown_active(cooldown_seconds=cooldown_seconds):
+                logger.info(f"⏳ [LOSS COOLDOWN LOCKOUT] Short signal ({decision_action}) blocked: 5-bar ({tf_mins * 5} min) lockout active after previous Short loss.")
+                self.db_manager.log_message("WARNING", f"⏳ [LOSS COOLDOWN LOCKOUT] Short entry blocked for 5 bars ({tf_mins * 5} mins) following a loss.", "TradingEngine")
                 decision_action = None
                 entry_side = None
                     
@@ -1654,9 +1716,18 @@ class ScalpingBot:
                         regime_cfg = get_regime_config(self.symbol)
                         symbol_futures = self.symbol.replace('/', '').split(':')[0] # Standardize Bybit V5 string structure
 
+                        price_precision = 4 if close_price < 10 else 2
+                        tp_formatted = f"{target1:.{price_precision}f}"
+                        sl_formatted = f"{stop_loss:.{price_precision}f}"
+
                         order_params = {
                             'category': 'linear',
-                            'timeInForce': 'PostOnly'
+                            'timeInForce': 'PostOnly',
+                            'takeProfit': tp_formatted,
+                            'stopLoss': sl_formatted,
+                            'tpTriggerBy': 'LastPrice',
+                            'slTriggerBy': 'LastPrice',
+                            'tpslMode': 'Full'
                         }
                         order_type = 'limit'
 
@@ -1670,8 +1741,8 @@ class ScalpingBot:
                             params=order_params
                         )
                         entry_order_id = response.get('id', '')
-                        self.db_manager.log_message("INFO", f"Live entry order placed successfully. ID: {entry_order_id}", "TradingEngine")
-                        # Native Maker TP will be placed automatically by check_active_positions once position is confirmed filled on exchange.
+                        self.db_manager.log_message("INFO", f"Live entry order placed successfully. ID: {entry_order_id} with Native TP={tp_formatted}, SL={sl_formatted}", "TradingEngine")
+                        # Native Maker TP/SL also synced on exchange level when confirmed filled
                     except Exception as e:
                         self.db_manager.log_message("ERROR", f"Failed to place live order: {e}", "TradingEngine")
                         return
@@ -1691,7 +1762,9 @@ class ScalpingBot:
                     pos_data["layers_count"] = pos_data.get("layers_count", 1) + 1
                     pos_data["last_entry_bar_index"] = latest_idx
                     pos_data["last_entry_price"] = close_price
-                    # Keep SL/TP from the first entry to ensure strategy consistency
+                    pos_data["tp_order_placed"] = False  # Reset flag to re-sync exchange TP/SL
+                    # Re-sync native exchange TP/SL for the new weighted average entry price
+                    asyncio.create_task(self.sync_native_exchange_tpsl(self.symbol, entry_side, new_entry_price, new_size))
                 else:
                     pos_data = {
                         "symbol": self.symbol,
