@@ -55,8 +55,20 @@ RISK_CONTROL_REGIME = {
     },
     'SUI_USDT': {
         'leverage': 5,
-        'min_position_size': 1.0,
+        'min_position_size': 10.0,
         'take_profit_pct': 0.018,
+        'stop_loss_pct': 0.010,
+        'max_hold_kline': 6,
+        'order_params': {'postOnly': True, 'category': 'linear'},
+        'cmo_oversold_long': -60.0,
+        'cmo_overbought_short': 60.0,
+        'max_notional_exposure': 50.0,
+        'margin_shield_threshold_pct': 0.70
+    },
+    'AVAX_USDT': {
+        'leverage': 5,
+        'min_position_size': 0.1,
+        'take_profit_pct': 0.015,
         'stop_loss_pct': 0.010,
         'max_hold_kline': 6,
         'order_params': {'postOnly': True, 'category': 'linear'},

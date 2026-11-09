@@ -372,17 +372,29 @@ class RiskManager:
         if hasattr(bot_instance, 'bars_held'):
             bot_instance.bars_held = 0
 
-        # 4. Telegram Emergency Broadcast
-        alert_msg = (
-            f"🚨 *[เปิดใช้งานระบบตัดขาดทุนฉุกเฉิน (Circuit Breaker)]*\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"• *คู่เหรียญ:* `{target_symbol}`\n"
-            f"• *การดำเนินการ:* สั่งปิดทุกไม้ทันทีด้วยราคาตลาด (`close_all_positions`)\n"
-            f"• *สาเหตุ:* `{reason}`\n"
-            f"• *ราคาที่ปิดสถานะ:* `${exit_price:.4f}`\n"
-            f"• *ขาดทุนจริงรอบนี้:* `${pnl:.2f} USDT`\n"
-            f"• *ระบบป้องกัน:* Margin Shield ตัดขาดทุนทันทีเพื่อป้องกันพอร์ตจากการถูก Liquidate บนกระดานเทรด"
-        )
+        # 4. Telegram Notification Broadcast
+        if reason == "TIME_BASED_EMERGENCY_RELEASE":
+            pnl_label = "กำไร" if pnl > 0 else ("ขาดทุน" if pnl < 0 else "ผลลัพธ์สุทธิ")
+            alert_msg = (
+                f"⏱️ *[ปิดสัญญาตามรอบเวลา Scalping (Time-Based Release)]*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"• *คู่เหรียญ:* `{target_symbol}`\n"
+                f"• *การดำเนินการ:* ปิดสัญญาที่ราคาตลาดเพื่อคืนมาร์จิ้นเข้าพอร์ต\n"
+                f"• *ราคาที่ปิดสถานะ:* `${exit_price:.4f}`\n"
+                f"• *{pnl_label}:* `${pnl:+.4f} USDT`\n"
+                f"• *ระบบป้องกัน:* ครบโควตาเวลาถือครอง 18 นาที (6 แท่งเทียน) ตามกฎความปลอดภัย Scalping ปิดเพื่อคืนทุนสดเข้าพอร์ตและเตรียมรับจังหวะใหม่ครับ"
+            )
+        else:
+            alert_msg = (
+                f"🚨 *[เปิดใช้งานระบบตัดขาดทุนฉุกเฉิน (Circuit Breaker)]*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"• *คู่เหรียญ:* `{target_symbol}`\n"
+                f"• *การดำเนินการ:* สั่งปิดทุกไม้ทันทีด้วยราคาตลาด (`close_all_positions`)\n"
+                f"• *สาเหตุ:* `{reason}`\n"
+                f"• *ราคาที่ปิดสถานะ:* `${exit_price:.4f}`\n"
+                f"• *ขาดทุนจริงรอบนี้:* `${pnl:.2f} USDT`\n"
+                f"• *ระบบป้องกัน:* Margin Shield ตัดขาดทุนทันทีเพื่อป้องกันพอร์ตจากการถูก Liquidate บนกระดานเทรด"
+            )
         if hasattr(bot_instance, 'send_telegram'):
             await bot_instance.send_telegram(alert_msg)
 

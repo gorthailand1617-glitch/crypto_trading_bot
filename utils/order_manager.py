@@ -222,17 +222,39 @@ class OrderManager:
             available_balance = 0.0
             wallet_total_equity = 0.0
         
-        # 2. ดึงสเปกสัญญาขั้นต่ำของเหรียญนั้นๆ จาก CCXT Markets Data (Default BTC = 0.001)
+        # 2. ดึงสเปกสัญญาขั้นต่ำของเหรียญนั้นๆ จาก CCXT Markets Data (Force Linear Futures contract spec)
         await self.exchange.load_markets()
-        market = self.exchange.market(symbol)
+        linear_symbol = symbol if ":" in symbol else f"{symbol}:USDT"
+        market = None
+        if hasattr(self.exchange, "markets") and linear_symbol in self.exchange.markets:
+            market = self.exchange.market(linear_symbol)
+        elif hasattr(self.exchange, "markets") and symbol in self.exchange.markets:
+            market = self.exchange.market(symbol)
+
+        market_min = float(market['limits']['amount']['min']) if (market and market.get('limits', {}).get('amount', {}).get('min')) else 0.001
         
-        # Correct enforcement for small accounts on SOL/USDT
-        if symbol.startswith("SOL"):
-            min_order_size = 0.1  # Absolute safe execution limit for Bybit SOL Futures (~7.7 USDT value)
-        elif symbol.startswith("XRP"):
-            min_order_size = 3.0  # Absolute safe execution limit for Bybit XRP Futures (> $3 USDT value)
+        # Enforce per-symbol precision and safe minimums
+        if "SUI" in symbol:
+            raw_size = max(10.0, market_min)
+        elif "SOL" in symbol:
+            raw_size = max(0.1, market_min)
+        elif "XRP" in symbol:
+            raw_size = max(3.0, market_min)
+        elif "AVAX" in symbol:
+            raw_size = max(0.1, market_min)
+        elif "ADA" in symbol:
+            raw_size = max(5.0, market_min)
+        elif "ETH" in symbol:
+            raw_size = max(0.01, market_min)
+        elif "DOGE" in symbol:
+            raw_size = max(10.0, market_min)
         else:
-            min_order_size = float(market['limits']['amount']['min']) if market else 0.001
+            raw_size = max(1.0, market_min)
+
+        try:
+            min_order_size = float(self.exchange.amount_to_precision(linear_symbol if linear_symbol in self.exchange.markets else symbol, raw_size))
+        except Exception:
+            min_order_size = raw_size
         
         # 3. คำนวณมูลค่าสัญญาดิบดิบ (Notional Value) และมาร์จิ้นขั้นต่ำที่ต้องใช้ค้ำประกัน
         notional_value = min_order_size * entry_price

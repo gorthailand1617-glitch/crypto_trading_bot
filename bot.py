@@ -822,14 +822,40 @@ class ScalpingBot:
         if position_size <= 0:
             position_size = regime_cfg.get("min_position_size", 1.0)
 
+        # Force correct Bybit Linear contract precision and minimum size formatting
+        linear_symbol = symbol if ":" in symbol else f"{symbol}:USDT"
+        try:
+            if self.exchange and hasattr(self.exchange, 'markets'):
+                if linear_symbol not in self.exchange.markets:
+                    await self.exchange.load_markets()
+                if linear_symbol in self.exchange.markets:
+                    m = self.exchange.market(linear_symbol)
+                    min_amt = float(m.get('limits', {}).get('amount', {}).get('min') or 1.0)
+                    position_size = max(position_size, min_amt)
+                    position_size = float(self.exchange.amount_to_precision(linear_symbol, position_size))
+        except Exception as fmt_err:
+            logger.debug(f"Precision format fallback: {fmt_err}")
+
         entry_side = side.upper()
         symbol_futures = symbol.replace('/', '').split(':')[0]
-        logger.info(f"🚀 [DYNAMIC AI ENTRY] {entry_side} {symbol_futures} size={position_size} @ {close_price}")
+        
+        price_precision = 4 if close_price < 10 else 2
+        tp_formatted = f"{target1:.{price_precision}f}"
+        sl_formatted = f"{stop_loss:.{price_precision}f}"
+
+        logger.info(f"🚀 [DYNAMIC AI ENTRY] {entry_side} {symbol_futures} size={position_size} @ {close_price} TP={tp_formatted} SL={sl_formatted}")
 
         entry_order_id = "DRY_RUN"
         if not self.dry_run:
             try:
-                order_params = {'category': 'linear'}
+                order_params = {
+                    'category': 'linear',
+                    'takeProfit': tp_formatted,
+                    'stopLoss': sl_formatted,
+                    'tpTriggerBy': 'LastPrice',
+                    'slTriggerBy': 'LastPrice',
+                    'tpslMode': 'Full'
+                }
                 response = await self.exchange.create_order(
                     symbol=symbol_futures,
                     type='market',
