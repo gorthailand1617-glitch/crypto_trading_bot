@@ -447,6 +447,7 @@ class ScalpingBot:
                 "• **/vault** : 🏦 ตรวจสอบยอดเงินกองทุนสะสมรักษาทุน (1/3 Vault Rule)\n"
                 "• **/stats** : สรุปจำนวนรอบและเปอร์เซ็นต์ Win Rate จากฐานข้อมูล\n"
                 "• **/ai** : 🧠 เรียกสภา Multi-Agent AI วิเคราะห์เหรียญปัจจุบัน\n"
+                "• **/capabilities** : 📋 ดูรายงานความสามารถและระบบป้องกันทั้งหมดของบอท\n"
                 "• **/pause** : ⏸️ สั่งหยุดพักการเปิดออเดอร์ใหม่ชั่วคราว\n"
                 "• **/resume** : ▶️ สั่งให้บอทกลับมาสแกนและเทรดต่อ\n"
                 "• **/closeall** : 🚨 สั่งปิดทุกไม้ฉุกเฉินทันทีด้วย Market Order"
@@ -481,8 +482,36 @@ class ScalpingBot:
             await self.cmd_signal_th(chat_id)
         elif command in ["/radar", "/radar_th"]:
             await self.cmd_radar(chat_id, sub_arg)
+        elif command in ["/capabilities", "/about", "/features"]:
+            await self.reply_to_telegram(chat_id, self.get_capabilities_report())
         else:
             await self.reply_to_telegram(chat_id, f"❓ ไม่รู้จักคำสั่ง `{command}` ครับ พิมพ์ **/help** เพื่อดูรายการคำสั่งทั้งหมด")
+
+    def get_capabilities_report(self) -> str:
+        """Returns a formatted Telegram report of all current bot capabilities."""
+        mode_str = "ทดสอบเสมือนจริง (Dry Run)" if self.dry_run else "เทรดเงินจริง (Live Trading)"
+        radar_status = "🟢 เปิดอยู่" if getattr(self, "radar_enabled", True) else "⏸️ ปิดอยู่"
+        autohunt_status = "🟢 เปิดอยู่" if getattr(self, "auto_hunt", False) else "⏸️ ปิดอยู่"
+        return (
+            f"🤖 *รายงานความสามารถของบอท AlphaScalp (V6.3 QuantOrb Edition)*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• *โหมดปัจจุบัน:* `{mode_str}` | *Leverage:* `{self.leverage}x` (Isolated)\n"
+            f"• *Auto-Hunt (Bybit):* {autohunt_status} | *Binance TH Radar:* {radar_status}\n\n"
+            f"🧠 *1. สภา AI อัจฉริยะ (Multi-Agent Council + RetroValix)*\n"
+            f"• วิเคราะห์ตลาดด้วย **Stationary Z-Score** (`RetZ`, `VolZ`, `DistZ`) แทนการเดาราคาดิบ ลดความผิดพลาดเมื่อตลาดเปลี่ยนทิศทาง\n"
+            f"• มี **Edge Gate** ตรวจสอบให้ผลตอบแทนคาดหวังสูงกว่าค่าธรรมเนียม + Slippage\n\n"
+            f"🛡️ *2. เกราะสภาพคล่อง QuantOrb (Liquidity Health Shield)*\n"
+            f"• **Shock Simulator:** จำลองแรงเท $25,000 USD ลงใน Order Book 20 ชั้น เพื่อวัด Price Impact ก่อนเข้าไม้\n"
+            f"• **Spread & OBI Filter:** บล็อกออเดอร์ทันทีหาก Spread > `0.15%` หรือเจอกำแพง Ask/Bid กดราคา\n"
+            f"• **Health Score (0–100):** เกรด `DANGER` (<40) บล็อกทันที, `RISKY` (40–59) ลดขนาดไม้ 50%, `CLEAN/OK` เทรดเต็มระบบ\n\n"
+            f"⚡ *3. ระบบเทรดอัตโนมัติบน Bybit (Linear Futures)*\n"
+            f"• สแกนคัดเลือกเหรียญแชมป์โมเมนตัมสูงสุด (XRP, SOL, DOGE, SUI, BTC, ETH, ADA, AVAX)\n"
+            f"• ตั้ง **Native TP/SL** บนเซิร์ฟเวอร์ Bybit โดยตรง พร้อมระบบ **Time-Based Release** และ **Margin Shield**\n"
+            f"• ระบบจัดสรรกำไร **1/3 Safe Vault** แยกเก็บกำไรสะสมอัตโนมัติ\n\n"
+            f"📡 *4. เรดาร์เทรดมือบน Binance.th (Spot Copilot)*\n"
+            f"• ตรวจจับสัญญาณเกรด A+ (ความมั่นใจ ≥ 80%) แจ้งเตือนพร้อมโซนเข้าซื้อ TP1, TP2 และ SL ทั้งหน่วย USD และ THB\n\n"
+            f"💡 พิมพ์ `/help` เพื่อดูคำสั่งทั้งหมด หรือ `/status` เพื่อเช็คสถานะล่าสุดครับ"
+        )
 
     async def cmd_ai_analyze(self, chat_id: int) -> None:
         await self.reply_to_telegram(chat_id, "⏳ *[สภา AI กำลังประชุม]* กำลังเรียกทีมวิเคราะห์ 4 สาย และจัดโต้วาทีสด Bull vs Bear กรุณารอสักครู่ครับ...")
@@ -2524,6 +2553,7 @@ class ScalpingBot:
             f"• *สถานะความพร้อม:* สแกนหาจังหวะเทรดตลอด 24 ชม."
         )
         await self.send_telegram(start_msg)
+        await self.send_telegram(self.get_capabilities_report())
         # Spawn the Telegram Polling Loop and Binance TH Radar as background tasks
         telegram_task = asyncio.create_task(self.telegram_polling_loop())
         radar_task = asyncio.create_task(self.binance_th_radar_loop())
