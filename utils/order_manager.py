@@ -76,6 +76,112 @@ class OrderManager:
         await asyncio.sleep(0.5)
         return True
 
+    async def evaluate_liquidity_health(
+        self,
+        symbol: str,
+        side: str,
+        depth: int = 20,
+        max_spread_pct: float = 0.15,
+        shock_notional_usd: float = 25000.0
+    ) -> dict:
+        """
+        RetroValix + QuantOrb Liquidity Forensics & Microstructure Health Engine:
+        1. RetroValix Spread Gate: Checks bid-ask spread % to prevent instant slippage loss.
+        2. Orderbook Imbalance (OBI): Evaluates bid/ask wall concentration.
+        3. QuantOrb Shock Simulator: Simulates a $25k market dump/squeeze across orderbook levels
+           to measure price impact % and compute a 0-100 Health Score (CLEAN / OK / RISKY / DANGER).
+        """
+        default_clean = {
+            "ok": True,
+            "health_score": 100,
+            "verdict": "CLEAN",
+            "imbalance": 0.0,
+            "spread_pct": 0.0,
+            "impact_pct": 0.0,
+            "reason": "Dry run / exchange bypass."
+        }
+        dry_run = self.state_manager.get("dry_run", True) if self.state_manager else True
+        if dry_run or not self.exchange:
+            return default_clean
+
+        try:
+            linear_symbol = symbol if ":" in symbol else f"{symbol}:USDT"
+            orderbook = await self.exchange.fetch_order_book(linear_symbol, limit=depth, params={'category': 'linear'})
+            bids = orderbook.get('bids', [])[:depth]
+            asks = orderbook.get('asks', [])[:depth]
+
+            if not bids or not asks:
+                return {**default_clean, "health_score": 70, "verdict": "OK", "reason": "Empty orderbook depth; neutral bypass."}
+
+            best_bid = float(bids[0][0])
+            best_ask = float(asks[0][0])
+            mid_price = (best_bid + best_ask) / 2.0
+            if mid_price <= 0:
+                return default_clean
+
+            spread_pct = ((best_ask - best_bid) / mid_price) * 100.0
+
+            total_bid_vol = sum([float(b[1]) for b in bids])
+            total_ask_vol = sum([float(a[1]) for a in asks])
+            total_vol = total_bid_vol + total_ask_vol
+            imbalance = ((total_bid_vol - total_ask_vol) / total_vol) if total_vol > 0 else 0.0
+
+            # QuantOrb Shock Simulator: If a $25k market order sweeps the vulnerable side, how far does price move?
+            side_upper = side.upper()
+            target_levels = bids if side_upper in ["BUY", "LONG"] else asks
+            remaining_usd = shock_notional_usd
+            last_hit_price = float(target_levels[0][0])
+            for lvl_price, lvl_qty in target_levels:
+                lvl_usd = float(lvl_price) * float(lvl_qty)
+                last_hit_price = float(lvl_price)
+                remaining_usd -= lvl_usd
+                if remaining_usd <= 0:
+                    break
+
+            impact_pct = abs((last_hit_price - mid_price) / mid_price) * 100.0
+
+            # Compute Health Score (0 - 100)
+            score = 100.0
+            score -= min(40.0, spread_pct * 150.0)   # Spread penalty (e.g. 0.15% spread = -22.5 pts)
+            score -= min(35.0, impact_pct * 20.0)    # Thin book / whale dump impact penalty
+            if side_upper in ["BUY", "LONG"] and imbalance < -0.25:
+                score -= min(25.0, abs(imbalance) * 40.0)
+            elif side_upper in ["SELL", "SHORT"] and imbalance > 0.25:
+                score -= min(25.0, abs(imbalance) * 40.0)
+
+            health_score = max(0, min(100, int(round(score))))
+            if health_score >= 80:
+                verdict = "CLEAN"
+            elif health_score >= 60:
+                verdict = "OK"
+            elif health_score >= 40:
+                verdict = "RISKY"
+            else:
+                verdict = "DANGER"
+
+            ok = True
+            reason = f"Health {health_score}/100 [{verdict}] | Spread={spread_pct:.3f}% | OBI={imbalance:+.2f} | ShockImpact={impact_pct:.2f}%"
+            if spread_pct > max_spread_pct:
+                ok = False
+                verdict = "DANGER" if verdict != "DANGER" else verdict
+                reason = f"⚠️ [SPREAD GATE REJECT] Spread {spread_pct:.3f}% > max {max_spread_pct:.2f}% ({reason})"
+            elif health_score < 40:
+                ok = False
+                reason = f"⚠️ [QUANTORB DANGER REJECT] {reason}"
+
+            return {
+                "ok": ok,
+                "health_score": health_score,
+                "verdict": verdict,
+                "imbalance": imbalance,
+                "spread_pct": spread_pct,
+                "impact_pct": impact_pct,
+                "reason": reason
+            }
+        except Exception as e:
+            logger.debug(f"Liquidity health check exception: {e}")
+            return {**default_clean, "health_score": 75, "verdict": "OK", "reason": f"Exception during health check: {e}"}
+
     async def check_orderbook_imbalance(
         self,
         symbol: str,
@@ -84,36 +190,28 @@ class OrderManager:
         threshold: float = 0.35
     ) -> Tuple[bool, float, str]:
         """
-        Microstructure Edge: Orderbook Imbalance (OBI).
+        Microstructure Edge: Orderbook Imbalance (OBI) + Spread Guard.
         Calculates imbalance ratio between bid and ask depth:
         imbalance = (sum(bids) - sum(asks)) / (sum(bids) + sum(asks))
         Range: [-1.0, 1.0]
-        - For BUY: Reject if imbalance < -threshold (heavy ask wall right above).
-        - For SELL: Reject if imbalance > threshold (heavy bid wall right below).
         """
         dry_run = self.state_manager.get("dry_run", True) if self.state_manager else True
         if dry_run or not self.exchange:
             return True, 0.0, "Dry run / exchange bypass."
 
         try:
-            orderbook = await self.exchange.fetch_order_book(symbol, limit=depth, params={'category': 'linear'})
-            bids = orderbook.get('bids', [])[:depth]
-            asks = orderbook.get('asks', [])[:depth]
-
-            total_bid_vol = sum([b[1] for b in bids]) if bids else 0.0
-            total_ask_vol = sum([a[1] for a in asks]) if asks else 0.0
-
-            total_vol = total_bid_vol + total_ask_vol
-            if total_vol <= 0:
-                return True, 0.0, "Orderbook depth empty; bypass."
-
-            imbalance = (total_bid_vol - total_ask_vol) / total_vol
-
+            health = await self.evaluate_liquidity_health(symbol, side, depth=max(depth, 15))
+            imbalance = health["imbalance"]
             side_upper = side.upper()
+
+            if not health["ok"]:
+                self.db_manager.log_message("WARNING", health["reason"], "OrderManager")
+                return False, imbalance, health["reason"]
+
             if side_upper in ["BUY", "LONG"] and imbalance < -threshold:
                 reason = (
                     f"⚠️ [OBI FILTER REJECT] Heavy ask wall detected (Imbalance: {imbalance:.2f} < -{threshold:.2f}). "
-                    f"Ask Vol: {total_ask_vol:.1f} vs Bid Vol: {total_bid_vol:.1f}. Skipping Long entry."
+                    f"Health: {health['health_score']}/100 [{health['verdict']}]. Skipping Long entry."
                 )
                 self.db_manager.log_message("WARNING", reason, "OrderManager")
                 return False, imbalance, reason
@@ -121,12 +219,12 @@ class OrderManager:
             if side_upper in ["SELL", "SHORT"] and imbalance > threshold:
                 reason = (
                     f"⚠️ [OBI FILTER REJECT] Heavy bid wall detected (Imbalance: {imbalance:.2f} > +{threshold:.2f}). "
-                    f"Bid Vol: {total_bid_vol:.1f} vs Ask Vol: {total_ask_vol:.1f}. Skipping Short entry."
+                    f"Health: {health['health_score']}/100 [{health['verdict']}]. Skipping Short entry."
                 )
                 self.db_manager.log_message("WARNING", reason, "OrderManager")
                 return False, imbalance, reason
 
-            return True, imbalance, f"Orderbook imbalance {imbalance:.2f} acceptable for {side_upper}."
+            return True, imbalance, health["reason"]
         except Exception as e:
             logger.debug(f"Orderbook imbalance check exception: {e}")
             return True, 0.0, f"Exception during OBI fetch: {e}"

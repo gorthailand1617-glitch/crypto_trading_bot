@@ -339,24 +339,28 @@ Provide a concise Thai summary for Telegram with bold emojis. Max 200 words.
             cmo = c.get("cmo", 0.0)
             atr_pct = c.get("atr_pct", 0.0)
             vol_spike = c.get("vol_spike", 1.0)
+            ret_z = c.get("return_zscore", 0.0)
+            vol_z = c.get("vol_zscore", 0.0)
+            dist_z = c.get("dist_zscore", 0.0)
             regime = c.get("regime", "UNKNOWN")
             candidates_summary.append(
-                f"{i}. {sym}: Price=${px:.4f} | 24h={chg:+.2f}% | CMO={cmo:.1f} | ATR%={atr_pct:.2f}% | VolSpike={vol_spike:.2f}x | Regime={regime}"
+                f"{i}. {sym}: Price=${px:.4f} | 24h={chg:+.2f}% | CMO={cmo:.1f} | ATR%={atr_pct:.2f}% | VolSpike={vol_spike:.2f}x | RetZ={ret_z:+.2f}σ | VolZ={vol_z:+.2f}σ | DistZ={dist_z:+.2f}σ | Regime={regime}"
             )
 
         prompt = f"""
-You are the Supreme Trading Council of TradingAgents (Multi-Asset Crypto Momentum Specialist).
-Below is live market data for candidate cryptocurrency perpetual futures pairs on Bybit:
+You are the Supreme Trading Council of TradingAgents (Multi-Asset Crypto Momentum & Microstructure Specialist).
+Below is live market data with Stationary Z-Score Features (RetroValix Quant Framework) for Bybit perpetual futures:
 
 {chr(10).join(candidates_summary)}
 
 Mission:
 Carefully analyze all candidates and select the SINGLE coin pair that currently presents the HIGHEST AND FASTEST profit opportunity.
 
-Key Evaluation Criteria:
-1. Speed & Volatility: High ATR% and high Volume Spike (moving aggressively right now).
-2. Momentum Edge: CMO extreme oversold (<-60) for long or overbought (>60) for short, or clear breakout.
-3. High Risk/Reward Ratio: Clean take profit target with low invalidation distance.
+Key Evaluation Criteria (RetroValix + QuantOrb):
+1. Stationary Edge (Do NOT guess raw price): Focus on RetZ (normalized return z-score), VolZ (volume anomaly z-score > +1.5σ), and DistZ (volatility-adjusted distance from EMA20).
+2. Speed & Volatility Edge: High ATR% and high Volume Spike, ensuring Expected Profit > Bybit Fees + Slippage (~0.15%).
+3. Momentum Edge: CMO extreme oversold (<-60) or DistZ < -1.5σ for Long, or overbought (>60) for Short in trending regimes.
+4. High Risk/Reward Ratio: Clean take profit target with low invalidation distance.
 
 Simulate the Council debate:
 - Technical Ninja: Compares velocity and momentum.
@@ -521,22 +525,26 @@ Return EXACT JSON ONLY (no other markdown or extra text):
             cmo = c.get("cmo", 0.0)
             atr_pct = c.get("atr_pct", 0.0)
             vol_spike = c.get("vol_spike", 1.0)
+            ret_z = c.get("return_zscore", 0.0)
+            vol_z = c.get("vol_zscore", 0.0)
+            dist_z = c.get("dist_zscore", 0.0)
             regime = c.get("regime", "UNKNOWN")
             candidates_summary.append(
-                f"{i}. {sym}: Price=${px:.4f} (~{px*usd_thb_rate:,.2f} THB) | 24h={chg:+.2f}% | CMO={cmo:.1f} | ATR%={atr_pct:.2f}% | VolSpike={vol_spike:.2f}x | Regime={regime}"
+                f"{i}. {sym}: Price=${px:.4f} (~{px*usd_thb_rate:,.2f} THB) | 24h={chg:+.2f}% | CMO={cmo:.1f} | ATR%={atr_pct:.2f}% | VolSpike={vol_spike:.2f}x | RetZ={ret_z:+.2f}σ | VolZ={vol_z:+.2f}σ | DistZ={dist_z:+.2f}σ | Regime={regime}"
             )
 
         prompt = f"""
 You are the Supreme Trading Council of TradingAgents acting as an AI Copilot for a human trader on Binance.th (Spot Market).
-Your mission: Identify if there is an ELITE Grade-A+ SPOT BUY (buying spot low to sell high) setup among the coins below.
+Your mission: Identify if there is an ELITE Grade-A+ SPOT BUY setup using Stationary Z-Score Edge & Lead-Lag Momentum (RetroValix Framework).
 
-Candidate Live Data:
+Candidate Live Data (Global Futures Lead Signals):
 {chr(10).join(candidates_summary)}
 
 Strict Quality Criteria:
 1. Direction: MUST be SPOT BUY (Long). Do NOT recommend Short/Sell since this is Spot trading.
-2. Confidence Gate: Only approve if Council Confidence is >= 80%. If no coin meets >= 80% confidence, return "has_signal": false.
-3. Realistic Targets: Provide clean Entry Zone (range), TP1 (conservative +1.5% to +2.5%), TP2 (stretch +3% to +6%), and Stop Loss (-1.0% to -2.0%).
+2. Stationary Anomaly & Lead-Lag Edge: Look for strong oversold bounce (DistZ < -1.2σ, CMO < -40) with surging volume (VolZ > +1.0σ), or strong momentum breakout where Binance.th Spot can capture the global price lag.
+3. Confidence Gate: Only approve if Council Confidence is >= 80%. If no coin meets >= 80% confidence, return "has_signal": false.
+4. Realistic Targets: Provide clean Entry Zone (range), TP1 (conservative +1.5% to +2.5%), TP2 (stretch +3% to +6%), and Stop Loss (-1.0% to -2.0%).
 
 Output EXACT JSON format only (no markdown, no backticks, no other text):
 {{

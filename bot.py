@@ -735,6 +735,9 @@ class ScalpingBot:
                 latest_regime = "TRENDING_UP" if change_24h > 1.0 else ("TRENDING_DOWN" if change_24h < -1.0 else "RANGE")
                 atr_pct = est_atr_pct
                 vol_spike = 1.0
+                return_zscore = 0.0
+                vol_zscore = 0.0
+                dist_zscore = 0.0
 
                 # Step 2: Attempt OHLCV retrieval with safety timeout (do NOT discard if timeout)
                 try:
@@ -767,6 +770,17 @@ class ScalpingBot:
                         vol_sma = df["volume"].rolling(window=14).mean().iloc[-1]
                         last_vol = df["volume"].iloc[-1]
                         vol_spike = float(last_vol / (vol_sma + 1e-9))
+
+                        # RetroValix Stationary Feature Engineering (Z-Scores instead of raw prices)
+                        returns = df["close"].pct_change().dropna()
+                        if len(returns) >= 5 and returns.std() > 0:
+                            return_zscore = float((returns.iloc[-1] - returns.mean()) / (returns.std() + 1e-9))
+                        vol_std = df["volume"].rolling(window=14).std().iloc[-1]
+                        if pd.notna(vol_std) and vol_std > 0:
+                            vol_zscore = float((last_vol - vol_sma) / (vol_std + 1e-9))
+                        ema_20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+                        if pd.notna(atr_14) and atr_14 > 0:
+                            dist_zscore = float((last_price - ema_20) / (atr_14 + 1e-9))
                 except Exception as candle_err:
                     logger.debug(f"Candle fetch fallback for {sym}: {candle_err}")
 
@@ -778,6 +792,9 @@ class ScalpingBot:
                     "cmo": latest_cmo,
                     "atr_pct": float(atr_pct),
                     "vol_spike": float(vol_spike),
+                    "return_zscore": float(return_zscore),
+                    "vol_zscore": float(vol_zscore),
+                    "dist_zscore": float(dist_zscore),
                     "regime": str(latest_regime)
                 }
             except Exception as e:
@@ -802,6 +819,19 @@ class ScalpingBot:
             logger.error(f"Cannot execute dynamic entry: invalid price for {symbol}")
             return
 
+        # RetroValix + QuantOrb Liquidity Health & Microstructure Shield
+        health = await self.order_manager.evaluate_liquidity_health(symbol, side)
+        if not health["ok"] or health["verdict"] == "DANGER":
+            logger.warning(f"🛡️ [LIQUIDITY SHIELD BLOCK] {symbol} {side}: {health['reason']}")
+            await self.send_telegram(
+                f"🛡️ *[เกราะป้องกันสภาพคล่อง QuantOrb บล็อกออเดอร์]*\n"
+                f"• *คู่เหรียญ:* `{symbol}` ({side})\n"
+                f"• *คะแนนสุขภาพ:* `{health['health_score']}/100` ([{health['verdict']}])\n"
+                f"• *สาเหตุ:* `{health['reason']}`\n"
+                f"• *การตัดสินใจ:* ยกเลิกการเข้าไม้เพื่อความปลอดภัยของพอร์ตครับ"
+            )
+            return
+
         tp_pct = float(ai_result.get("expected_tp_pct", regime_cfg.get("take_profit_pct", 0.015) * 100)) / 100.0
         sl_pct = float(ai_result.get("stop_loss_pct", regime_cfg.get("stop_loss_pct", 0.009) * 100)) / 100.0
 
@@ -819,6 +849,9 @@ class ScalpingBot:
 
         capital = await self.get_available_balance()
         position_size = await self.order_manager.calculate_position_size(capital, close_price, stop_loss, final_leverage, symbol)
+        if health["verdict"] == "RISKY":
+            logger.info(f"⚠️ [QUANTORB RISKY] Scaling {symbol} position size down by 50% (Health: {health['health_score']}/100)")
+            position_size = position_size * 0.5
         if position_size <= 0:
             position_size = regime_cfg.get("min_position_size", 1.0)
 
@@ -897,6 +930,7 @@ class ScalpingBot:
             f"• *ราคาเข้า:* `${close_price:.4f}`\n"
             f"• *เป้ากำไร (TP):* `${target1:.4f}` (+{tp_pct*100:.1f}%)\n"
             f"• *จุดตัดขาดทุน (SL):* `${stop_loss:.4f}` (-{sl_pct*100:.1f}%)\n"
+            f"• *เกราะสภาพคล่อง QuantOrb:* `{health['health_score']}/100` ([{health['verdict']}]) | OBI: `{health['imbalance']:+.2f}` | Spread: `{health['spread_pct']:.3f}%`\n"
             f"• *สถานะ:* {'🟢 ส่งออเดอร์ Bybit สำเร็จ' if not self.dry_run else '🟡 จำลองการเทรด (Dry Run)'}\n"
             f"• *คำตัดสิน Risk Emperor:* _{ai_result.get('decree_th', 'มติสภา AI เห็นชอบ')}_"
         )
