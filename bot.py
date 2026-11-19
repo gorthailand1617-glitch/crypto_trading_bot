@@ -136,6 +136,10 @@ class ScalpingBot:
         self.state_manager = StateManager()
         self.db_manager = DBManager()
         self.connection_ok = True
+        self.last_api_expiry_alert_ts = 0.0
+        self.last_api_expiry_check_ts = 0.0
+        self.api_key_expires_at = None
+        self.api_key_days_left = None
         
         # Monkey patch db_manager to output log statements to stdout in addition to the SQLite DB
         orig_log_msg = self.db_manager.log_message
@@ -929,7 +933,10 @@ class ScalpingBot:
                 logger.info(f"✅ Live market entry placed on Bybit. Order ID: {entry_order_id}")
             except Exception as e:
                 logger.error(f"❌ Failed to place dynamic entry on Bybit: {e}")
-                await self.send_telegram(f"❌ เกิดข้อผิดพลาดในการส่งคำสั่งเข้า Bybit: {e}")
+                if self.is_bybit_auth_or_expired_error(e):
+                    await self.notify_bybit_api_expired(str(e))
+                else:
+                    await self.send_telegram(f"❌ เกิดข้อผิดพลาดในการส่งคำสั่งเข้า Bybit: {e}")
                 return
 
         self.current_position_size = position_size if entry_side == 'BUY' else -position_size
@@ -1233,6 +1240,90 @@ class ScalpingBot:
         except Exception as e:
             await self.reply_to_telegram(chat_id, f"❌ *ไม่สามารถดึงข้อมูลสถิติได้:* `{e}`")
 
+    def is_bybit_auth_or_expired_error(self, err: Exception) -> bool:
+        """Detects Bybit API key expiration, revocation, or authentication errors."""
+        if isinstance(err, (ccxt.AuthenticationError, ccxt.PermissionDenied)):
+            return True
+        msg = str(err).lower()
+        auth_markers = (
+            "33004",          # Bybit: Your api key has expired
+            "10003",          # Bybit: API key is invalid
+            "10004",          # Bybit: Error sign
+            "10005",          # Bybit: Permission denied / expired
+            "api key has expired",
+            "api key is invalid",
+            "invalid api-key",
+            "apikey expired",
+            "permission denied",
+            "authentication",
+        )
+        return any(marker in msg for marker in auth_markers)
+
+    async def notify_bybit_api_expired(self, error_detail: str = "") -> None:
+        """Sends a rate-limited urgent Telegram alert when the Bybit API Key expires or fails auth."""
+        now = time.time()
+        cooldown_secs = 21600.0  # 6 hours between repeated alerts
+        if now - getattr(self, "last_api_expiry_alert_ts", 0.0) < cooldown_secs:
+            return
+        self.last_api_expiry_alert_ts = now
+        self.db_manager.log_message("ERROR", f"Bybit API Key expired or invalid: {error_detail}", "TradingEngine")
+        msg = (
+            "🚨 *[แจ้งเตือนด่วน: Bybit API Key หมดอายุหรือใช้งานไม่ได้!]*\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "• *สาเหตุ:* Bybit ปฏิเสธการเชื่อมต่อ API (คาดว่า API Key หมดอายุครบกำหนดเวลา หรือสิทธิ์ถูกยกเลิก)\n"
+            f"• *รายละเอียด Error:* `{str(error_detail)[:220]}`\n\n"
+            "🛠️ *วิธีแก้ไข (ใช้เวลา 1 นาที):*\n"
+            "1. เข้าแอป/เว็บ **Bybit** ➔ เมนู **API Management** ➔ กด **Create New Key**\n"
+            "2. เปิดสิทธิ์ **Unified Trading (Read-Write)** (และ Read-Only สำหรับ Wallet)\n"
+            "3. นำ `API Key` และ `API Secret` ใหม่ไปอัปเดตในหน้า **Render ➔ Environment** (`BYBIT_API_KEY` / `BYBIT_API_SECRET`)\n"
+            "4. กด **Save Changes** เพื่อให้บอทกลับมาเทรดต่ออัตโนมัติครับ"
+        )
+        await self.send_telegram(msg)
+
+    async def check_bybit_api_key_expiry(self, force: bool = False) -> None:
+        """
+        Proactively checks Bybit V5 /v5/user/query-api for API key expiration date.
+        Alerts via Telegram if <= 7 days remain or if the key is already expired.
+        """
+        if self.dry_run or not self.exchange:
+            return
+        now = time.time()
+        if not force and (now - getattr(self, "last_api_expiry_check_ts", 0.0) < 43200.0):  # every 12h
+            return
+        self.last_api_expiry_check_ts = now
+        try:
+            if not hasattr(self.exchange, "private_get_v5_user_query_api"):
+                return
+            resp = await self.exchange.private_get_v5_user_query_api()
+            result = resp.get("result", {}) if isinstance(resp, dict) else {}
+            expired_at_str = result.get("expiredAt", "")
+            if not expired_at_str:
+                return
+            from datetime import datetime, timezone
+            exp_dt = datetime.fromisoformat(expired_at_str.replace("Z", "+00:00"))
+            days_left = (exp_dt - datetime.now(timezone.utc)).total_seconds() / 86400.0
+            self.api_key_expires_at = expired_at_str
+            self.api_key_days_left = round(days_left, 1)
+            logger.info(f"🔑 [BYBIT API CHECK] Key expires at {expired_at_str} ({days_left:.1f} days remaining)")
+            if days_left <= 0:
+                await self.notify_bybit_api_expired(f"API key expired at {expired_at_str}")
+            elif days_left <= 7.0:
+                last_warn = getattr(self, "last_api_expiry_alert_ts", 0.0)
+                if now - last_warn >= 86400.0:  # Warn once per 24h when <= 7 days left
+                    self.last_api_expiry_alert_ts = now
+                    await self.send_telegram(
+                        "⏳ *[แจ้งเตือนล่วงหน้า: Bybit API Key ใกล้หมดอายุ]*\n"
+                        "━━━━━━━━━━━━━━━━━━\n"
+                        f"• *เวลาที่เหลือ:* ประมาณ `{days_left:.1f} วัน`\n"
+                        f"• *วันหมดอายุ:* `{expired_at_str}`\n"
+                        "💡 กรุณาเตรียมสร้าง API Key ใหม่บน Bybit และอัปเดตบน Render ก่อนหมดอายุ เพื่อไม่ให้บอทหยุดชะงักครับ"
+                    )
+        except Exception as e:
+            if self.is_bybit_auth_or_expired_error(e):
+                await self.notify_bybit_api_expired(str(e))
+            else:
+                logger.debug(f"Bybit API expiry check skipped: {e}")
+
     # Advanced Resilient Network Request Wrapper for Windows 11
     async def execute_safe_ccxt_call(self, coro_func, *args, **kwargs):
         max_retries = 5
@@ -1241,6 +1332,10 @@ class ScalpingBot:
                 return await coro_func(*args, **kwargs)
             except (ccxt.ExchangeNotAvailable, ccxt.RequestTimeout, Exception) as err:
                 err_str = str(err)
+                if self.is_bybit_auth_or_expired_error(err):
+                    logger.error(f"🔑 [BYBIT API EXPIRED/AUTH ERROR] {err_str}")
+                    await self.notify_bybit_api_expired(err_str)
+                    raise err
                 if attempt == max_retries:
                     logger.error(f"❌ [CRITICAL NETWORK DROP] CCXT call failed after {max_retries} attempts: {err_str}")
                     raise err
@@ -1514,6 +1609,7 @@ class ScalpingBot:
 
     async def run_strategy_tick(self) -> None:
         """The main analysis evaluation logic executed at candle closes."""
+        await self.check_bybit_api_key_expiry()
         # Auto-Hunt Engine: If enabled and currently no position, let AI Council scan & trade the fastest coin
         if getattr(self, "auto_hunt", False) and self.current_position_size == 0:
             try:
@@ -2536,6 +2632,7 @@ class ScalpingBot:
         self.order_manager.exchange = self.exchange
         self.risk_manager.exchange = self.exchange
         await self.get_available_balance()
+        await self.check_bybit_api_key_expiry(force=True)
         self.recalculate_stats()
         self.db_manager.log_message("INFO", f"Scalping Bot {BOT_VERSION} initialized. Symbol: {self.symbol}, Timeframe: {self.timeframe}, Dry Run: {self.dry_run}", "TradingEngine")
 
